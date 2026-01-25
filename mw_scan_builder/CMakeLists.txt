@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "src/mw_scan_builder.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        drv_vl53l0x
+        micro_ros_espidf_component
+)

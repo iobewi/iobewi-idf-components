@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/esp_usbcdc_common.c"
+        "src/esp_usbcdc_logging.c"
+        "src/esp_usbcdc_transport.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_tinyusb
+        micro_ros_espidf_component
+)

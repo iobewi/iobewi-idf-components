@@ -1,0 +1,179 @@
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_err.h"
+#include "esp_log.h"
+
+#include "vl53l0x_platform.h"
+#include "vl53l0x_def.h"
+
+// I2C wrapper functions (new driver) exposed by the component.
+extern esp_err_t vl53l0x_i2c_write_reg(uint8_t addr_7b, uint8_t reg,
+                                      const uint8_t *data, size_t len,
+                                      uint32_t clk_hz);
+extern esp_err_t vl53l0x_i2c_read_reg(uint8_t addr_7b, uint8_t reg,
+                                     uint8_t *data, size_t len,
+                                     uint32_t clk_hz);
+
+static const char *TAG = "vl53_platform";
+
+static inline uint32_t dev_clk_hz(const VL53L0X_DEV Dev)
+{
+    // ST often stores kHz in comms_speed_khz.
+    uint32_t khz = (Dev && Dev->comms_speed_khz) ? Dev->comms_speed_khz : 400;
+    return khz * 1000U;
+}
+
+static inline uint8_t dev_addr_7b(const VL53L0X_DEV Dev)
+{
+    // IMPORTANT:
+    // In the ST API, I2cDevAddr is stored as an 8-bit left-aligned address (7b << 1).
+    // Example: 0x29 -> 0x52
+    // Convert to 7-bit here for the ESP-IDF wrappers.
+    if (!Dev) return 0;
+
+    uint8_t a = Dev->I2cDevAddr;
+
+    return (uint8_t)(a >> 1);
+}
+
+/**
+ * ST API platform: write multiple bytes.
+ */
+VL53L0X_Error VL53L0X_WriteMulti(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata, uint32_t count)
+{
+    const uint8_t addr7 = dev_addr_7b(Dev);
+    const uint32_t clk  = dev_clk_hz(Dev);
+
+    esp_err_t err = vl53l0x_i2c_write_reg(addr7, index, pdata, (size_t)count, clk);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WriteMulti err=%d addr7=0x%02X reg=0x%02X", (int)err, addr7, index);
+        return VL53L0X_ERROR_CONTROL_INTERFACE;
+    }
+    return VL53L0X_ERROR_NONE;
+}
+
+VL53L0X_Error VL53L0X_ReadMulti(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata, uint32_t count)
+{
+    const uint8_t addr7 = dev_addr_7b(Dev);
+    const uint32_t clk  = dev_clk_hz(Dev);
+
+    esp_err_t err = vl53l0x_i2c_read_reg(addr7, index, pdata, (size_t)count, clk);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ReadMulti err=%d addr7=0x%02X reg=0x%02X", (int)err, addr7, index);
+        return VL53L0X_ERROR_CONTROL_INTERFACE;
+    }
+    return VL53L0X_ERROR_NONE;
+}
+
+VL53L0X_Error VL53L0X_WriteByte(VL53L0X_DEV Dev, uint8_t index, uint8_t data)
+{
+    return VL53L0X_WriteMulti(Dev, index, &data, 1);
+}
+
+VL53L0X_Error VL53L0X_ReadByte(VL53L0X_DEV Dev, uint8_t index, uint8_t *pdata)
+{
+    return VL53L0X_ReadMulti(Dev, index, pdata, 1);
+}
+
+VL53L0X_Error VL53L0X_WriteWord(VL53L0X_DEV Dev, uint8_t index, uint16_t data)
+{
+    uint8_t buf[2] = { (uint8_t)(data >> 8), (uint8_t)(data & 0xFF) };
+    return VL53L0X_WriteMulti(Dev, index, buf, 2);
+}
+
+VL53L0X_Error VL53L0X_ReadWord(VL53L0X_DEV Dev, uint8_t index, uint16_t *pdata)
+{
+    uint8_t buf[2] = {0};
+    VL53L0X_Error st = VL53L0X_ReadMulti(Dev, index, buf, 2);
+    if (st != VL53L0X_ERROR_NONE) return st;
+
+    *pdata = (uint16_t)((buf[0] << 8) | buf[1]);
+    return VL53L0X_ERROR_NONE;
+}
+
+VL53L0X_Error VL53L0X_WriteDWord(VL53L0X_DEV Dev, uint8_t index, uint32_t data)
+{
+    uint8_t buf[4] = {
+        (uint8_t)(data >> 24),
+        (uint8_t)(data >> 16),
+        (uint8_t)(data >> 8),
+        (uint8_t)(data & 0xFF)
+    };
+    return VL53L0X_WriteMulti(Dev, index, buf, 4);
+}
+
+VL53L0X_Error VL53L0X_ReadDWord(VL53L0X_DEV Dev, uint8_t index, uint32_t *pdata)
+{
+    uint8_t buf[4] = {0};
+    VL53L0X_Error st = VL53L0X_ReadMulti(Dev, index, buf, 4);
+    if (st != VL53L0X_ERROR_NONE) return st;
+
+    *pdata = ((uint32_t)buf[0] << 24) |
+             ((uint32_t)buf[1] << 16) |
+             ((uint32_t)buf[2] << 8)  |
+             ((uint32_t)buf[3]);
+    return VL53L0X_ERROR_NONE;
+}
+
+VL53L0X_Error VL53L0X_PollingDelay(VL53L0X_DEV Dev)
+{
+    (void)Dev;
+    vTaskDelay(pdMS_TO_TICKS(1));
+    return VL53L0X_ERROR_NONE;
+}
+
+void VL53L0X_WaitMs(VL53L0X_DEV Dev, int32_t wait_ms)
+{
+    (void)Dev;
+    if (wait_ms <= 0) return;
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)wait_ms));
+}
+
+// -----------------------------------------------------------------------------
+// ST "platform" legacy compatibility symbols.
+// -----------------------------------------------------------------------------
+// Some ST API versions (and/or ports) use symbols such as
+// VL53L0X_WrByte/RdByte/... instead of VL53L0X_WriteByte/ReadByte/...
+// The core sources in this repository expect them.
+
+VL53L0X_Error VL53L0X_WrByte(VL53L0X_DEV Dev, uint8_t index, uint8_t data)
+{
+    return VL53L0X_WriteByte(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_RdByte(VL53L0X_DEV Dev, uint8_t index, uint8_t *data)
+{
+    return VL53L0X_ReadByte(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_WrWord(VL53L0X_DEV Dev, uint8_t index, uint16_t data)
+{
+    return VL53L0X_WriteWord(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_RdWord(VL53L0X_DEV Dev, uint8_t index, uint16_t *data)
+{
+    return VL53L0X_ReadWord(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_WrDWord(VL53L0X_DEV Dev, uint8_t index, uint32_t data)
+{
+    return VL53L0X_WriteDWord(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_RdDWord(VL53L0X_DEV Dev, uint8_t index, uint32_t *data)
+{
+    return VL53L0X_ReadDWord(Dev, index, data);
+}
+
+VL53L0X_Error VL53L0X_UpdateByte(VL53L0X_DEV Dev, uint8_t index, uint8_t AndData, uint8_t OrData)
+{
+    uint8_t v = 0;
+    VL53L0X_Error st = VL53L0X_RdByte(Dev, index, &v);
+    if (st != VL53L0X_ERROR_NONE) return st;
+
+    v = (uint8_t)((v & AndData) | OrData);
+    return VL53L0X_WrByte(Dev, index, v);
+}

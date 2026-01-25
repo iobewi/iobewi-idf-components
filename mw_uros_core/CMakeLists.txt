@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/mw_uros_core.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        micro_ros_espidf_component
+        lib_status_led
+        freertos
+        esp_timer
+)
