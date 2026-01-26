@@ -1,0 +1,21 @@
+menu "A02YYUW Basic App"
+
+config A02_BASIC_EN_GPIO
+    int "Enable GPIO"
+    default 14
+    help
+        GPIO used to enable power for the A02YYUW sensor.
+
+config A02_BASIC_UART_RX_GPIO
+    int "UART RX GPIO"
+    default 18
+    help
+        GPIO connected to the A02YYUW TX pin (ESP RX).
+
+config A02_BASIC_MODE_GPIO
+    int "Mode GPIO"
+    default 5
+    help
+        GPIO connected to the A02YYUW RX pin used to select output mode.
+
+endmenu

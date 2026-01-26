@@ -103,6 +103,7 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 
 | Composant | Description | Bus/Interface |
 |-----------|-------------|---------------|
+| **drv_a02yyuw** | Driver capteur ultrasonique A02YYUW (SEN0311) | UART (9600 bps) |
 | **drv_led_rgb** | Driver LED RGB WS2812/SK6812 | GPIO (RMT) |
 | **drv_vl53l0x** | Driver capteur ToF VL53L0X | I2C |
 
