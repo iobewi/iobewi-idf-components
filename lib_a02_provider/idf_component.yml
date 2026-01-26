@@ -1,0 +1,16 @@
+## IDF Component Manager manifest file
+version: "1.0.0"
+description: "Provider pour capteurs ultrasoniques A02YYUW avec filtrage médian"
+url: "https://github.com/iobewi/iobewi-idf-components"
+documentation: "https://github.com/iobewi/iobewi-idf-components/tree/main/lib_a02_provider"
+
+dependencies:
+  idf:
+    version: ">=5.0.0"
+
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c3
+  - esp32c6

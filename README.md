@@ -111,6 +111,7 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 
 | Composant | Description | Dépendances |
 |-----------|-------------|-------------|
+| **lib_a02_provider** | Provider capteurs ultrasoniques A02YYUW avec filtrage médian | drv_a02yyuw |
 | **lib_status_led** | Mapping états applicatifs → couleurs LED | drv_led_rgb |
 
 ### Middleware micro-ROS (`mw_*`)
