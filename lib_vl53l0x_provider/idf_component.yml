@@ -1,0 +1,6 @@
+version: "1.0.0"
+description: "Provider multi-capteurs VL53L0X avec lecture parallèle et snapshot atomique"
+url: https://github.com/iobewi/iobewi-idf-components
+dependencies:
+  idf:
+    version: ">=5.0.0"

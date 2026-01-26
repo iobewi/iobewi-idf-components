@@ -157,10 +157,12 @@ esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_sto
 
 esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
                             const scan_config_t *cfg,
-                            const tof_sample_t samples[TOF_COUNT],
-                            const tof_hw_config_t *hw_cfg)
+                            const tof_sample_t *samples,
+                            const tof_hw_config_t *hw_cfg,
+                            uint8_t sensor_count)
 {
     if (!msg || !cfg || !samples || !hw_cfg || cfg->bins <= 0) return ESP_ERR_INVALID_ARG;
+    if (sensor_count == 0) return ESP_ERR_INVALID_ARG;
     if (!msg->ranges.data || msg->ranges.capacity < (size_t)cfg->bins) return ESP_ERR_INVALID_ARG;
 #if CONFIG_MICRO_ROS_SCAN_ALLOC_GUARD
     heap_guard_t guard = heap_guard_begin();
@@ -171,7 +173,7 @@ esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
         msg->ranges.data[i] = NAN;
     }
 
-    for (int s = 0; s < TOF_COUNT; s++) {
+    for (int s = 0; s < sensor_count; s++) {
         const int idx = (int)hw_cfg[s].bin_idx;
         if ((unsigned)idx >= (unsigned)cfg->bins) continue;
 

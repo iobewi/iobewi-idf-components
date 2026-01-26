@@ -15,13 +15,6 @@ idf_component_register(
         # ---- ESP-IDF driver layer ----
         "src/vl53l0x_driver.c"
 
-        # ---- ToF configuration and providers ----
-        "src/tof_config.c"
-        "src/tof_provider.c"
-        "src/tof_provider_mock.c"
-        "src/tof_provider_vl53.c"
-        "src/tof_snapshot.c"
-
     INCLUDE_DIRS
         "include"
 

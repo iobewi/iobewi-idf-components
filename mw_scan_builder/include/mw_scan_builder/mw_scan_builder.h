@@ -4,8 +4,11 @@
 
 #include <esp_err.h>
 #include <sensor_msgs/msg/laser_scan.h>
-#include "drv_vl53l0x/tof_provider.h"
-#include "drv_vl53l0x/tof_config.h"
+#include "lib_vl53l0x_provider/lib_vl53l0x_provider_types.h"
+
+// Compatibilité avec anciens noms
+typedef lib_vl53l0x_sample_t tof_sample_t;
+typedef lib_vl53l0x_hw_config_t tof_hw_config_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -98,8 +101,9 @@ esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_sto
  */
 esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
                             const scan_config_t *cfg,
-                            const tof_sample_t samples[TOF_COUNT],
-                            const tof_hw_config_t *hw_cfg);
+                            const tof_sample_t *samples,
+                            const tof_hw_config_t *hw_cfg,
+                            uint8_t sensor_count);
 
 
 #ifdef __cplusplus

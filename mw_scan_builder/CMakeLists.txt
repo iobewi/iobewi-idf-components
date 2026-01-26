@@ -4,6 +4,6 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
-        drv_vl53l0x
+        lib_vl53l0x_provider
         micro_ros_espidf_component
 )

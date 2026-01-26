@@ -1,11 +1,11 @@
 idf_component_register(
     SRCS
-        "src/scan_engine.c"
+        "src/app_scan_tof.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        drv_vl53l0x
+        lib_vl53l0x_provider
         mw_scan_builder
-        freertos
+    PRIV_REQUIRES
         esp_timer
 )

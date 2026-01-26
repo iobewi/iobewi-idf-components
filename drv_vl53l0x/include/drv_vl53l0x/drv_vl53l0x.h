@@ -1,46 +1,45 @@
+/**
+ * @file drv_vl53l0x.h
+ * @brief API publique du driver VL53L0X
+ *
+ * Driver bas niveau pour capteurs VL53L0X (ToF laser ranging).
+ * Fournit accès I2C direct et gestion multi-capteurs via XSHUT.
+ *
+ * @note Conforme au CDC iobewi-idf-components
+ */
+
 #pragma once
 
 #include <stdint.h>
 #include <stddef.h>
 
-#include "esp_err.h"
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+#include "drv_vl53l0x/drv_vl53l0x_types.h"
 
-#include "vl53l0x_api.h" 
-
-/* =========================
- *  Constants
- * ========================= */
-
-/* Default VL53L0X I2C address (7-bit). */
-#define VL53L0X_I2C_ADDRESS_DEFAULT_7B  (0x29)
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* =========================
- *  Public data structures
+ *  Typedef pour compatibilité
  * ========================= */
 
 /**
- * @brief Represents an already-addressed VL53L0X sensor.
+ * @brief Alias pour compatibilité (utilisez drv_vl53l0x_dev_t dans nouveau code)
+ * @deprecated Utilisez drv_vl53l0x_dev_t
  */
-typedef struct {
-    uint8_t     addr_7b;     /**< 7-bit I2C address. */
-    VL53L0X_Dev_t st;   // Persistent ST device state.
-    bool inited;
-    bool gpio_ready_enabled;
-    bool gpio_active_high;
-    gpio_num_t int_gpio;
-    SemaphoreHandle_t gpio_ready_sem;
-} vl53l0x_dev_t;
+typedef drv_vl53l0x_dev_t vl53l0x_dev_t;
 
 /**
- * @brief Slot used for multi-sensor address assignment via XSHUT.
+ * @brief Alias pour compatibilité (utilisez drv_vl53l0x_slot_t dans nouveau code)
+ * @deprecated Utilisez drv_vl53l0x_slot_t
  */
-typedef struct {
-    gpio_num_t  xshut_gpio;  /**< GPIO connected to XSHUT. */
-    uint8_t     new_addr_7b; /**< New 7-bit I2C address to assign. */
-} vl53l0x_slot_t;
+typedef drv_vl53l0x_slot_t vl53l0x_slot_t;
+
+/**
+ * @brief Alias pour compatibilité (utilisez DRV_VL53L0X_I2C_ADDRESS_DEFAULT_7B dans nouveau code)
+ * @deprecated Utilisez DRV_VL53L0X_I2C_ADDRESS_DEFAULT_7B
+ */
+#define VL53L0X_I2C_ADDRESS_DEFAULT_7B  DRV_VL53L0X_I2C_ADDRESS_DEFAULT_7B
 
 /* =========================
  *  I2C – initialization (new driver)
@@ -152,3 +151,7 @@ esp_err_t vl53l0x_enable_gpio_ready(vl53l0x_dev_t *dev,
  */
 esp_err_t vl53l0x_wait_gpio_ready(vl53l0x_dev_t *dev,
                                  TickType_t timeout);
+
+#ifdef __cplusplus
+}
+#endif
