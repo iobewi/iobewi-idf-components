@@ -127,6 +127,7 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 | Composant | Description | Publishes |
 |-----------|-------------|-----------|
 | **app_scan_tof** | Application scan ToF 360° | sensor_msgs/LaserScan |
+| **app_scan_ultra** | Application scan ultrasonique A02YYUW | sensor_msgs/LaserScan |
 
 ---
 

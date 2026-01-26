@@ -1,0 +1,45 @@
+menu "Ultrasonic Scan App Configuration"
+
+    config APP_SCAN_UART_RX_GPIO
+        int "UART RX GPIO"
+        default 18
+        help
+            GPIO connected to A02YYUW TX pin (UART RX)
+
+    config APP_SCAN_MODE_GPIO
+        int "Mode GPIO"
+        default 5
+        help
+            GPIO connected to A02YYUW RX pin (mode control)
+
+    config APP_SCAN_EN_GPIO_0
+        int "EN GPIO Sensor 0 (0°)"
+        default 14
+        help
+            GPIO for STMPS2141STR EN (sensor 0, front)
+
+    config APP_SCAN_EN_GPIO_1
+        int "EN GPIO Sensor 1 (90°)"
+        default 10
+        help
+            GPIO for STMPS2141STR EN (sensor 1, right)
+
+    config APP_SCAN_EN_GPIO_2
+        int "EN GPIO Sensor 2 (180°)"
+        default 7
+        help
+            GPIO for STMPS2141STR EN (sensor 2, back)
+
+    config APP_SCAN_EN_GPIO_3
+        int "EN GPIO Sensor 3 (270°)"
+        default 4
+        help
+            GPIO for STMPS2141STR EN (sensor 3, left)
+
+    config APP_SCAN_STATUS_LED_GPIO
+        int "Status LED GPIO"
+        default 38
+        help
+            GPIO for status LED (micro-ROS status)
+
+endmenu

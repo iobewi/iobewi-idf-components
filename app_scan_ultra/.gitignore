@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
