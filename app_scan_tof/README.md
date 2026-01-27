@@ -29,9 +29,9 @@ Ce composant orchestre le scan ToF et coordonne les différents modules (driver,
 ┌─────────────────────────────────┐
 │     app_scan_tof                │
 │  ┌────────────────────────┐     │
-│  │ scan_engine_create()   │     │
-│  │ scan_engine_start()    │     │
-│  │ scan_engine_step()     │     │
+│  │ app_scan_tof_new()     │     │
+│  │ app_scan_tof_step()    │     │
+│  │ app_scan_tof_del()     │     │
 │  └────────────────────────┘     │
 └──┬────────────────────┬─────────┘
    │                    │
@@ -44,25 +44,33 @@ Ce composant orchestre le scan ToF et coordonne les différents modules (driver,
 
 ## API Publique
 
-### Scan Engine
+### Types
 
 ```c
+typedef struct app_scan_tof_s app_scan_tof_t;
+
 typedef struct {
-    int max_scans_per_cycle;
-    int scan_timeout_ms;
-} scan_engine_config_t;
+    lib_vl53l0x_provider_config_t provider_config;
+    mw_scan_builder_config_t scan_config;
+    int64_t (*time_provider)(void);
+} app_scan_tof_config_t;
+```
 
-typedef struct scan_engine scan_engine_t;
+### Fonctions
 
-esp_err_t scan_engine_create(const scan_engine_config_t *cfg,
-                               scan_engine_t **out);
+```c
+esp_err_t app_scan_tof_config_init(app_scan_tof_config_t *config);
 
-esp_err_t scan_engine_start(scan_engine_t *engine);
+esp_err_t app_scan_tof_new(const app_scan_tof_config_t *config,
+                            app_scan_tof_t **out);
 
-esp_err_t scan_engine_step(scan_engine_t *engine,
-                             tof_snapshot_t *snapshot_out);
+esp_err_t app_scan_tof_step(app_scan_tof_t *handle,
+                             sensor_msgs__msg__LaserScan *out_msg);
 
-void scan_engine_destroy(scan_engine_t *engine);
+esp_err_t app_scan_tof_set_time_provider(app_scan_tof_t *handle,
+                                          int64_t (*time_provider_ns)(void));
+
+esp_err_t app_scan_tof_del(app_scan_tof_t *handle);
 ```
 
 ## Utilisation avec mw_uros_core
@@ -72,29 +80,34 @@ Voir `/workspaces/uros_vl53l0x/main/uros_app_scan.c` pour l'implémentation comp
 ```c
 // Callbacks pour mw_uros_core
 bool scan_app_init(void *app_context) {
-    // Créer scan_engine
-    // Créer scan_builder
+    // Créer app_scan_tof
+    app_scan_tof_config_t config;
+    app_scan_tof_config_init(&config);
+    // ... configurer ...
+    app_scan_tof_new(&config, (app_scan_tof_t**)app_context);
     return true;
 }
 
 bool scan_app_step(void *app_context, void *ros_message) {
-    // scan_engine_step() → récupère snapshot ToF
-    // scan_builder_fill() → remplit LaserScan
-    return true;
+    // app_scan_tof_step() → lit capteurs + remplit LaserScan
+    app_scan_tof_t *handle = *(app_scan_tof_t**)app_context;
+    sensor_msgs__msg__LaserScan *msg = (sensor_msgs__msg__LaserScan*)ros_message;
+    return app_scan_tof_step(handle, msg) == ESP_OK;
 }
 
 void scan_app_fini(void *app_context) {
-    // Détruit scan_engine et scan_builder
+    // Détruit app_scan_tof
+    app_scan_tof_t *handle = *(app_scan_tof_t**)app_context;
+    app_scan_tof_del(handle);
 }
 ```
 
 ## Configuration
 
-Le scan engine est configuré via:
-- Nombre max de scans par cycle
-- Timeout de scan (ms)
-- Nombre de bins angulaires (LaserScan)
-- Limites de portée min/max
+L'application est configurée via `app_scan_tof_config_t`:
+- **provider_config** : Configuration des capteurs VL53L0X (I2C, pins, mapping)
+- **scan_config** : Configuration du LaserScan (bins, angles, portées)
+- **time_provider** : Provider de temps pour synchronisation ROS (optionnel)
 
 ## Dépendances
 

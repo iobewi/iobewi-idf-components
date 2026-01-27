@@ -34,7 +34,7 @@ typedef struct {
     lib_vl53l0x_provider_config_t provider_config;
 
     // Configuration du scan LaserScan
-    scan_config_t scan_config;
+    mw_scan_builder_config_t scan_config;
 
     // Provider de temps (optionnel, NULL = esp_timer)
     int64_t (*time_provider)(void);
