@@ -1,3 +1,11 @@
+> **STATUT : INFORMATIF**
+>
+> Ce document :
+> - n’introduit aucune règle normative
+> - ne remplace aucune règle du standard
+> - ne peut jamais contredire `docs/standard.md`
+>
+> Toute règle opposable est définie exclusivement dans `docs/standard.md`.
 # 📎 Template — Rapport d’audit composant
 
 ```

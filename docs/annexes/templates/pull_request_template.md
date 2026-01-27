@@ -1,13 +1,22 @@
-## Template — PR iobewi-idf-components
+> **STATUT : INFORMATIF**
+>
+> Ce document :
+> - n’introduit aucune règle normative
+> - ne remplace aucune règle du standard
+> - ne peut jamais contredire `docs/standard.md`
+>
+> Toute règle opposable est définie exclusivement dans `docs/standard.md`.
 
-### Objet
+# Template — PR iobewi-idf-components
+
+## Objet
 
 * [ ] nouveau composant
 * [ ] refactor conformité
 * [ ] correction bug
 * [ ] doc
 
-### Conformité standard
+## Conformité standard
 
 * [ ] taxonomie OK (`STD-TAX-*`)
 * [ ] structure OK (`STD-STR-*`)
@@ -16,18 +25,18 @@
 * [ ] tests OK (`STD-TST-*`)
 * [ ] basic_app OK (`STD-STR-002`)
 
-### Preuves
+## Preuves
 
 * sortie `check_conformity.sh` :
 * `idf.py build` (basic_app) :
 * tests unitaires :
 
-### Notes / risques
+## Notes / risques
 
 * breaking change : oui/non
 * migration requise : oui/non
 
-### Exceptions
+## Exceptions
 
 * [ ] aucune
 * [ ] exception ajoutée : EXC-...
