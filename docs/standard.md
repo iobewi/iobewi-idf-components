@@ -373,10 +373,19 @@ Tout composant avec état **DOIT** :
 
 **NORMATIF**
 
-* Un composant **PEUT** fournir un `Kconfig` uniquement si une configuration compile-time est nécessaire.
-* Un composant **NE DOIT PAS** imposer des paramètres “métier” hardcodés via Kconfig quand une configuration runtime via API est possible.
+- Un composant **PEUT** fournir un `Kconfig` uniquement si une configuration *compile-time* est nécessaire.
+- Un composant **NE DOIT PAS** imposer des paramètres “métier” via `Kconfig` lorsque :
+  - une configuration *runtime* via API est possible,
+  - ou que le paramétrage dépend du contexte applicatif.
 
-> Bonnes pratiques : `docs/annexes/component_playbook.md` (informatif).
+Les paramètres exposés via `Kconfig` doivent se limiter à :
+- l’activation de fonctionnalités optionnelles,
+- les niveaux de logs,
+- les choix strictement liés au build.
+
+> Bonnes pratiques et exemples d’usage :
+> - `docs/annexes/examples.md` (configuration des `basic_app`)
+> - `docs/annexes/api_patterns.md` (configuration runtime via API)
 
 ### STD-BLD-003 — Isolation du composant
 
@@ -499,66 +508,80 @@ Un composant est **rejeté** si :
 
 ---
 
-Oui — et tu as raison de la **mettre à jour maintenant** : cette section est la **carte officielle de la base de connaissance non normative**.
-Je te propose une version **complète, cohérente avec tout ce que tu as construit**, et surtout **stable**.
+## 10. 📎 Annexes (NON NORMATIVES)
 
-Voici la **section 10 mise à jour**, prête à remplacer l’existante.
+Les documents listés ci-dessous sont **strictement informatifs**.
+
+Ils :
+
+* ❌ **n’ajoutent aucune règle**
+* ❌ **n’en remplacent aucune**
+* ❌ **ne peuvent jamais contredire** `docs/standard.md`
+
+👉 Toute règle opposable est définie **exclusivement** dans `docs/standard.md`.
 
 ---
 
-## 10. Annexes (NON NORMATIVES)
+### 🎯 Rôle des annexes
 
-Les documents suivants sont **informatifs uniquement**.
-Ils **n’ajoutent aucune règle**, **n’en remplacent aucune** et **ne peuvent jamais contredire** `docs/standard.md`.
+Les annexes servent à :
 
-Ils servent à :
+* expliquer **comment appliquer** le standard
+* guider les **audits, refactors et migrations**
+* accélérer l’adoption par les **humains et les agents IA**
+* industrialiser les pratiques (CI, templates, workflows)
 
-* expliquer **comment appliquer** le standard,
-* accélérer l’adoption (humains & IA),
-* industrialiser audits, CI, migrations.
+Elles sont des **outils d’exécution**, jamais une autorité.
+
+---
+
+### 📂 Structure des annexes
 
 ```text
 docs/annexes/
-├── api_patterns.md        # patterns d’implémentation (handle opaque, headers, API)
-├── anti_patterns.md       # erreurs structurelles fréquentes + corrections
-├── audit_playbook.md      # méthode d’audit, diagnostic, priorisation (P0/P1/P2)
-├── ci_contract.md         # ce que la CI vérifie / bloque (contrat implicite)
-├── testing.md             # stratégie de tests unitaires & non-régression
-├── examples.md            # guide des basic_app (structure, CMake, pièges)
-├── ai_tools.md            # intégration IA (Claude, Codex, Copilot) + prompts projet
-├── glossary.md            # vocabulaire canonique du framework
-├── exceptions.md          # mécanisme de dérogation tracée (non normative)
-├── migration.md           # gestion des breaking changes & transitions
-├── templates/
-│   ├── component_template.md      # squelette canonique de composant
-│   ├── audit_report_template.md   # format standard de rapport d’audit
-│   ├── exception_template.md      # modèle de dérogation au standard
-│   └── pull_request_template.md   # checklist PR conformité
+├── audit_playbook.md          # procédure d’audit stricte (comment auditer + verdict)
+├── audit_remediation.md       # diagnostic & remédiation après audit (comment corriger)
+├── api_patterns.md            # patterns d’implémentation conformes (API, headers, handles)
+├── anti_patterns.md           # erreurs structurelles fréquentes + stratégies de correction
+├── testing.md                 # stratégie de tests unitaires & non-régression
+├── ci_contract.md             # ce que la CI vérifie / bloque (application du standard)
+├── examples.md                # guide des basic_app (structure, CMake, pièges courants)
+├── migration.md               # gestion des breaking changes & transitions
+├── exceptions.md              # mécanisme de dérogation tracée (hors standard)
+├── ai_tools.md                # intégration IA (prompts, règles d’usage, limites)
+├── glossary.md                # vocabulaire canonique du framework
+└── templates/
+    ├── component_template.md      # squelette canonique de composant
+    ├── audit_report_template.md   # format standard de rapport d’audit
+    ├── exception_template.md      # modèle de dérogation documentée
+    └── pull_request_template.md   # checklist de conformité PR
 ```
 
-### 🔒 Rappel normatif (important)
+### 🔒 Rappel normatif (IMPORTANT)
 
-* ❌ **Aucune règle n’est définie dans ces fichiers**
-* ❌ **Aucun agent IA ne peut s’y référer comme source normative**
+* ❌ **Aucune règle n’est définie dans les annexes**
+* ❌ **Aucun agent IA ne peut les utiliser comme source normative**
 * ✅ **Seul `docs/standard.md` est opposable**
 
-Toute divergence entre :
+En cas de divergence entre :
 
-* `standard.md`
-* et une annexe
+* `docs/standard.md`
+* une annexe quelconque
 
-→ **le standard prévaut toujours**
+➡️ **le standard prévaut toujours**, sans interprétation.
+
+---
 
 ### 🧭 Lecture recommandée (non obligatoire)
 
-| Profil               | Annexes utiles                                            |
-| -------------------- | --------------------------------------------------------- |
-| Nouveau contributeur | `glossary.md`, `component_template.md`, `api_patterns.md` |
-| Audit / refactor     | `audit_playbook.md`, `anti_patterns.md`                   |
-| CI / release         | `ci_contract.md`, `testing.md`                            |
-| IA / automatisation  | `ai_tools.md`, `templates/`                               |
-| Migration            | `migration.md`, `exceptions.md`                           |
-
+| Profil                 | Annexes utiles                                             |
+| ---------------------- | ---------------------------------------------------------- |
+| Nouveau contributeur   | `glossary.md`, `component_template.md`, `api_patterns.md`  |
+| Audit / conformité     | `audit_playbook.md`, `audit_report_template.md`            |
+| Refactor / correction  | `audit_remediation.md`, `anti_patterns.md`                 |
+| CI / release           | `ci_contract.md`, `testing.md`, `pull_request_template.md` |
+| IA / automatisation    | `ai_tools.md`, `templates/`                                |
+| Migration / transition | `migration.md`, `exceptions.md`                            |
 
 ---
 

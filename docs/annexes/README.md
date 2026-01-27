@@ -52,7 +52,6 @@ docs/annexes/
 ├── microros.md         # micro-ROS, rcl/rclc, QoS, transport
 ├── examples.md         # Exemples complets et cas d’usage
 ├── migration.md        # Guides de refactorisation et harmonisation
-├── tooling.md          # Scripts, CI, outils internes
 
 ```
 

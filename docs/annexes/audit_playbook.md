@@ -1,27 +1,31 @@
 # 🧪 Audit Playbook — iobewi-idf-components
 
+## Procédure d’audit de conformité
+
 ## Annexe informative au standard `docs/standard.md`
 
-> **STATUT : INFORMATIF**
+> **STATUT : INFORMATIF — PROCÉDURAL**
 >
-> Ce document décrit **comment auditer** un composant vis-à-vis du standard.
-> Il **n’introduit aucune règle normative**.
+> Ce document décrit **COMMENT AUDITER** un composant vis-à-vis du standard.
 >
-> Toute règle opposable est définie **exclusivement** dans `docs/standard.md`.
+> * Il **n’introduit aucune règle normative**
+> * Il **n’interprète jamais** le standard
+> * Il **n’explique pas comment corriger**
+>
+> 👉 Toute règle opposable est définie **exclusivement** dans `docs/standard.md`.
 
 ---
 
 ## 1. Objectif du playbook
 
-Ce playbook fournit une **méthodologie reproductible** pour :
+Ce playbook définit une **procédure d’audit stricte, reproductible et déterministe** permettant de :
 
-- auditer un composant existant
-- qualifier sa conformité au standard
-- identifier précisément les violations
-- produire un diagnostic exploitable (humain / CI / IA)
+* auditer un composant existant
+* qualifier sa conformité au standard
+* identifier des **violations factuelles**
+* produire un **verdict exploitable** (humain / CI / IA)
 
-👉 Il ne remplace **jamais** le standard  
-👉 Il ne l’interprète **jamais**
+👉 Ce document est un **outil d’exécution**, pas un guide de conception.
 
 ---
 
@@ -29,39 +33,45 @@ Ce playbook fournit une **méthodologie reproductible** pour :
 
 Ce playbook est utilisé :
 
-- lors d’un audit initial d’un dépôt
-- avant une release
-- lors d’une intégration CI
-- en revue de code
-- par un agent IA chargé d’analyse statique
+* lors d’un audit initial de dépôt
+* avant une release
+* dans une pipeline CI
+* en revue de code formelle
+* par un agent IA d’analyse statique
 
-Il **n’est pas** un guide de développement.
+Il **ne doit pas** être utilisé pour :
+
+* développer un composant
+* décider d’une architecture
+* proposer une solution technique
 
 ---
 
 ## 3. Principe fondamental
 
-> **Un audit vérifie des faits observables.  
+> **Un audit vérifie des faits observables.
 > Il ne juge jamais l’intention.**
 
-Conséquences :
+Sont **irrecevables** :
 
-- “ça marche” ❌ non recevable
-- “c’est temporaire” ❌ non recevable
-- “l’IA l’a généré” ❌ non recevable
+* “ça fonctionne”
+* “c’est temporaire”
+* “ce sera refactoré plus tard”
+* “c’est généré par une IA”
 
-Seuls comptent :
-- les noms
-- les fichiers
-- les dépendances
-- les signatures
-- les tests
+Un audit se base **uniquement** sur :
+
+* les noms
+* les fichiers présents
+* les dépendances déclarées
+* les signatures publiques
+* les tests existants
 
 ---
 
-## 4. Vue d’ensemble d’un audit
+## 4. Ordre d’audit (STRICT)
 
-Un audit suit **toujours** cet ordre :
+Un audit suit **toujours** l’ordre ci-dessous :
 
 1. Identification canonique
 2. Taxonomie & dépendances
@@ -70,124 +80,125 @@ Un audit suit **toujours** cet ordre :
 5. Gestion mémoire
 6. Exemples
 7. Tests unitaires
-8. Verdict
+8. Verdict final
 
-👉 Ne jamais changer l’ordre  
-👉 Ne jamais “sauter” une étape
+⚠️
+
+* L’ordre **ne doit jamais être modifié**
+* Aucune étape **ne peut être sautée**
 
 ---
 
 ## 5. Étape 1 — Identification canonique
 
 ### Objectif
+
 Vérifier que le composant **existe formellement** selon le standard.
 
 ### Vérifications
 
-- [ ] Le composant a un dossier sous `components/`
-- [ ] Le nom du dossier commence par `iobewi_`
-- [ ] Le dossier correspond à **une seule catégorie normative**
+* [ ] Le composant possède un dossier sous `components/`
+* [ ] Le nom du dossier commence par `iobewi_`
+* [ ] Le composant correspond à **une seule catégorie normative**
 
-### Questions à se poser
+### Données à extraire
 
-- Quel est le `component_id` ?
-- Quelle catégorie est déduite automatiquement ?
-- Existe-t-il une ambiguïté de nommage ?
+* `component_id`
+* catégorie normative déduite
+* ambiguïtés éventuelles
 
-### Verdict possible
+### Verdict
 
-- ✅ OK
-- ❌ Violation STD-TAX-000 / STD-TAX-001
+* ✅ OK
+* ❌ Violation `STD-TAX-000` / `STD-TAX-001`
 
 ---
 
 ## 6. Étape 2 — Taxonomie & dépendances
 
 ### Objectif
-Vérifier que le composant respecte **strictement** son rôle.
+
+Vérifier que le composant respecte **strictement** son rôle normatif.
 
 ### Vérifications
 
-- [ ] Les dépendances sont compatibles avec la catégorie
-- [ ] Aucun include interdit (`rcl` dans drv_*, etc.)
-- [ ] Aucun appel matériel hors `drv_*`
+* [ ] Dépendances compatibles avec la catégorie
+* [ ] Aucun include interdit (ex: `rcl` dans `drv_*`)
+* [ ] Aucun accès matériel hors `drv_*`
 
-### Outils utiles
+### Outils autorisés
 
-- `grep rcl`
-- `grep i2c_master`
-- inspection de `CMakeLists.txt`
+```bash
+grep rcl
+grep i2c_master
+grep gpio
+```
 
-### Violations typiques
+Inspection de :
 
-- driver avec logique métier
-- lib avec accès GPIO
-- mw avec orchestration applicative
+* `CMakeLists.txt`
+* includes publics
 
-### Verdict possible
+### Verdict
 
-- ✅ OK
-- ❌ Violation STD-TAX-003
+* ✅ OK
+* ❌ Violation `STD-TAX-003`
 
 ---
 
 ## 7. Étape 3 — Structure de fichiers
 
 ### Objectif
+
 Valider la **structure canonique minimale**.
 
 ### Vérifications
 
-- [ ] `CMakeLists.txt`
-- [ ] `idf_component.yml`
-- [ ] `README.md`
-- [ ] `include/<component_api>/`
-- [ ] `<component_api>_types.h`
-- [ ] `<component_api>.h`
-- [ ] `src/<component_api>.c`
+* [ ] `CMakeLists.txt`
+* [ ] `idf_component.yml`
+* [ ] `README.md`
+* [ ] `include/<component_api>/`
+* [ ] `<component_api>_types.h`
+* [ ] `<component_api>.h`
+* [ ] `src/<component_api>.c`
 
 ### Red flags immédiats
 
-- headers hors namespace
-- fichiers `*_engine.h`
-- mélange types / API
-- multiple `.c` sans justification claire
+* headers hors namespace
+* fichiers `*_engine.h`
+* types et API mélangés
+* plusieurs `.c` sans justification documentée
 
-### Verdict possible
+### Verdict
 
-- ✅ OK
-- ❌ Violation STD-STR-001 / STD-STR-003
+* ✅ OK
+* ❌ Violation `STD-STR-001` / `STD-STR-003`
 
 ---
 
 ## 8. Étape 4 — API publique
 
 ### Objectif
-Vérifier que l’API respecte les **contrats observables**.
+
+Vérifier les **contrats observables** de l’API.
 
 ### Vérifications
 
-- [ ] Toutes les fonctions sont préfixées `<component_api>_`
-- [ ] Toutes retournent `esp_err_t`
-- [ ] Validation systématique des arguments
-- [ ] `*_new()` et `*_del()` présents si état
+* [ ] Toutes les fonctions sont préfixées `<component_api>_`
+* [ ] Toutes retournent `esp_err_t`
+* [ ] Validation systématique des arguments
+* [ ] `*_new()` / `*_del()` présents si état
 
 ### Inspection typique
 
 ```bash
 grep -R "esp_err_t" include/<component_api>/
-````
+```
 
-### Red flags
-
-* fonctions sans préfixe
-* types génériques (`config_t`, `context_t`)
-* structs publiques non opaques
-
-### Verdict possible
+### Verdict
 
 * ✅ OK
-* ❌ Violation STD-API-001 à STD-API-007
+* ❌ Violation `STD-API-001` → `STD-API-007`
 
 ---
 
@@ -195,25 +206,19 @@ grep -R "esp_err_t" include/<component_api>/
 
 ### Objectif
 
-Détecter toute dette mémoire ou ambiguïté d’ownership.
+Détecter toute **non-conformité mémoire observable**.
 
 ### Vérifications
 
-* [ ] allocations explicites
-* [ ] libérations associées
-* [ ] pas d’allocation cachée
-* [ ] comportement sain en cas d’erreur
+* [ ] Allocations explicites
+* [ ] Libérations associées
+* [ ] Aucun ownership ambigu
+* [ ] Comportement sain en cas d’erreur
 
-### Red flags
-
-* `malloc` sans `free`
-* allocation dans une fonction “read”
-* absence de `*_del()`
-
-### Verdict possible
+### Verdict
 
 * ✅ OK
-* ❌ Violation STD-MEM-001 / STD-MEM-002
+* ❌ Violation `STD-MEM-001` / `STD-MEM-002`
 
 ---
 
@@ -221,25 +226,19 @@ Détecter toute dette mémoire ou ambiguïté d’ownership.
 
 ### Objectif
 
-Valider l’utilisabilité réelle du composant.
+Vérifier l’utilisabilité minimale du composant.
 
 ### Vérifications
 
 * [ ] `examples/<component_id>/basic_app/` existe
-* [ ] compile sans modification
-* [ ] utilise uniquement l’API publique
-* [ ] aucune logique métier
+* [ ] Compile sans modification
+* [ ] Utilise uniquement l’API publique
+* [ ] Ne contient aucune logique métier
 
-### Red flags
-
-* accès à des headers internes
-* contournement d’API
-* exemple trop complexe
-
-### Verdict possible
+### Verdict
 
 * ✅ OK
-* ❌ Violation STD-STR-002
+* ❌ Violation `STD-STR-002`
 
 ---
 
@@ -251,21 +250,15 @@ Vérifier la **testabilité réelle** du composant.
 
 ### Vérifications
 
-* [ ] présence de tests unitaires
-* [ ] tests sans hardware réel
-* [ ] contrats API testés
-* [ ] erreurs couvertes
+* [ ] Tests unitaires présents
+* [ ] Aucun hardware réel requis
+* [ ] Contrats API testés
+* [ ] Cas d’erreur couverts
 
-### Red flags
-
-* tests absents
-* tests “visuels”
-* tests dépendants du matériel
-
-### Verdict possible
+### Verdict
 
 * ✅ OK
-* ❌ Violation STD-TST-001 / STD-TST-002
+* ❌ Violation `STD-TST-001` / `STD-TST-002`
 
 ---
 
@@ -275,49 +268,50 @@ Vérifier la **testabilité réelle** du composant.
 
 > **Une seule violation normative ⇒ composant NON conforme**
 
-Il n’existe **aucun score**, **aucun “presque conforme”** au niveau normatif.
+Il n’existe :
+
+* aucun score
+* aucun “presque conforme”
+* aucune interprétation
 
 ### États possibles
 
-| État                     | Signification                           |
-| ------------------------ | --------------------------------------- |
-| ✅ Conforme               | Aucune violation détectée               |
-| ❌ Non conforme           | ≥ 1 règle violée                        |
-| ⚠️ Dérogation documentée | Acceptée temporairement (hors standard) |
+| État           | Signification            |
+| -------------- | ------------------------ |
+| ✅ Conforme     | Aucune violation         |
+| ❌ Non conforme | ≥ 1 violation            |
+| ⚠️ Dérogation  | Documentée hors standard |
 
 ---
 
-## 13. Traçabilité d’audit (recommandé)
+## 13. Artefact d’audit (recommandé)
 
-Pour chaque audit, produire un artefact minimal :
+Chaque audit doit produire un artefact factuel :
 
 ```md
-## Audit — <component_id>
+Audit — <component_id>
 
 Date :
 Auditeur :
-Version standard :
+Version du standard :
 
 Violations détectées :
-- STD-XXX-YYY : description factuelle
+- STD-XXX-YYY : constat factuel
 
-Décision :
+Verdict :
 - Conforme / Non conforme
-
-Actions requises :
-- …
 ```
 
 ---
 
 ## 14. Usage par agents IA
 
-Les agents IA utilisant ce playbook :
+Les agents IA :
 
 * DOIVENT suivre l’ordre strict
 * NE DOIVENT PAS interpréter
-* NE DOIVENT PAS proposer de règle nouvelle
-* NE DOIVENT produire que des constats factuels
+* NE DOIVENT PAS proposer de solution
+* NE DOIVENT produire que des constats observables
 
 ---
 
@@ -325,16 +319,15 @@ Les agents IA utilisant ce playbook :
 
 Ce playbook :
 
-* rend les audits **objectifs**
-* élimine les débats subjectifs
-* permet l’automatisation progressive
-* protège le standard de toute dérive
+* rend les audits **objectifs et déterministes**
+* permet l’automatisation CI
+* protège le standard de toute dérive interprétative
 
-Il est un **outil**, pas une loi.
+Il est un **outil d’audit**, pas un guide de conception.
 
-La loi reste : `docs/standard.md`.
+👉 **Autorité unique** : `docs/standard.md`
 
 ---
 
-**Version** : 1.0
+**Version** : 1.1
 **Dernière mise à jour** : 2026-01-27
