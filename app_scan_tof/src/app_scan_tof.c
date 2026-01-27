@@ -46,7 +46,7 @@ static int64_t default_time_provider(void)
 /**
  * @brief Valide et log le mapping capteurs → bins
  */
-static bool validate_tof_bin_map(const scan_config_t *scan_cfg,
+static bool validate_tof_bin_map(const mw_scan_builder_config_t *scan_cfg,
                                  const lib_vl53l0x_hw_config_t *hw_configs,
                                  uint8_t sensor_count,
                                  bool *tof_map_logged)
@@ -208,11 +208,11 @@ esp_err_t app_scan_tof_step(app_scan_tof_t *handle,
     }
 
     // 2. Remplir le message LaserScan avec scan_builder
-    ret = scan_builder_fill(out_msg,
-                           &handle->config->scan_config,
-                           handle->samples,
-                           handle->config->provider_config.hw_configs,
-                           handle->sensor_count);
+    ret = mw_scan_builder_fill(out_msg,
+                                &handle->config->scan_config,
+                                handle->samples,
+                                handle->config->provider_config.hw_configs,
+                                handle->sensor_count);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to fill scan: %s", esp_err_to_name(ret));
         return ret;

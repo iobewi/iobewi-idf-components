@@ -41,9 +41,9 @@ static void heap_guard_end(heap_guard_t before, const char *label)
 }
 #endif
 
-esp_err_t scan_builder_init(sensor_msgs__msg__LaserScan *msg,
-                            const scan_config_t *cfg,
-                            scan_builder_storage_t *storage)
+esp_err_t mw_scan_builder_init(sensor_msgs__msg__LaserScan *msg,
+                               const mw_scan_builder_config_t *cfg,
+                               mw_scan_builder_storage_t *storage)
 {
     if (!msg || !cfg || !storage || !cfg->frame_id || cfg->bins <= 0) return ESP_ERR_INVALID_ARG;
     if (cfg->bins > SCAN_BINS_MAX) return ESP_ERR_INVALID_ARG;
@@ -127,7 +127,7 @@ esp_err_t scan_builder_init(sensor_msgs__msg__LaserScan *msg,
     return ESP_OK;
 }
 
-esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_storage_t *storage)
+esp_err_t mw_scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, mw_scan_builder_storage_t *storage)
 {
     if (!msg || !storage) return ESP_ERR_INVALID_ARG;
 
@@ -155,11 +155,11 @@ esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_sto
     return ESP_OK;
 }
 
-esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
-                            const scan_config_t *cfg,
-                            const tof_sample_t *samples,
-                            const tof_hw_config_t *hw_cfg,
-                            uint8_t sensor_count)
+esp_err_t mw_scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
+                               const mw_scan_builder_config_t *cfg,
+                               const tof_sample_t *samples,
+                               const tof_hw_config_t *hw_cfg,
+                               uint8_t sensor_count)
 {
     if (!msg || !cfg || !samples || !hw_cfg || cfg->bins <= 0) return ESP_ERR_INVALID_ARG;
     if (sensor_count == 0) return ESP_ERR_INVALID_ARG;
@@ -187,7 +187,7 @@ esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
         msg->ranges.data[idx] = r;
     }
 #if CONFIG_MICRO_ROS_SCAN_ALLOC_GUARD
-    heap_guard_end(guard, "scan_builder_fill");
+    heap_guard_end(guard, "mw_scan_builder_fill");
 #endif
     return ESP_OK;
 }

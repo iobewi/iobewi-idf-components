@@ -1,41 +1,12 @@
 #pragma once
-#include <stdbool.h>
-#include <stddef.h>
 
 #include <esp_err.h>
 #include <sensor_msgs/msg/laser_scan.h>
-#include "lib_vl53l0x_provider/lib_vl53l0x_provider_types.h"
-
-// Compatibilité avec anciens noms
-typedef lib_vl53l0x_sample_t tof_sample_t;
-typedef lib_vl53l0x_hw_config_t tof_hw_config_t;
+#include "mw_scan_builder/mw_scan_builder_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct {
-    float angle_min;
-    float angle_inc;
-    int bins;
-
-    float range_min;
-    float range_max;
-
-    float scan_time;
-    float time_increment;
-
-    const char *frame_id;
-} scan_config_t;
-
-typedef struct {
-    float *ranges_buffer;
-    size_t ranges_capacity;
-    char *frame_id_buffer;
-    size_t frame_id_capacity;
-    bool owns_ranges_buffer;
-    bool owns_frame_id_buffer;
-} scan_builder_storage_t;
 
 /**
  * @brief Initialize a LaserScan message according to the provided scan configuration.
@@ -63,9 +34,9 @@ typedef struct {
  *
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters, ESP_ERR_NO_MEM on allocation failure.
  */
-esp_err_t scan_builder_init(sensor_msgs__msg__LaserScan *msg,
-                            const scan_config_t *cfg,
-                            scan_builder_storage_t *storage);
+esp_err_t mw_scan_builder_init(sensor_msgs__msg__LaserScan *msg,
+                               const mw_scan_builder_config_t *cfg,
+                               mw_scan_builder_storage_t *storage);
 
 /**
  * @brief Deinitialize a LaserScan message previously initialized by scan_builder_init().
@@ -78,7 +49,7 @@ esp_err_t scan_builder_init(sensor_msgs__msg__LaserScan *msg,
  * @param storage Storage buffers and ownership tracking used at init time.
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters.
  */
-esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_storage_t *storage);
+esp_err_t mw_scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, mw_scan_builder_storage_t *storage);
 
 /**
  * @brief Populate a LaserScan message from a snapshot of ToF samples,
@@ -99,11 +70,11 @@ esp_err_t scan_builder_deinit(sensor_msgs__msg__LaserScan *msg, scan_builder_sto
  * @param hw_cfg    Hardware configuration table (includes bin indices).
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters.
  */
-esp_err_t scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
-                            const scan_config_t *cfg,
-                            const tof_sample_t *samples,
-                            const tof_hw_config_t *hw_cfg,
-                            uint8_t sensor_count);
+esp_err_t mw_scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
+                               const mw_scan_builder_config_t *cfg,
+                               const tof_sample_t *samples,
+                               const tof_hw_config_t *hw_cfg,
+                               uint8_t sensor_count);
 
 
 #ifdef __cplusplus

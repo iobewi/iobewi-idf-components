@@ -28,10 +28,10 @@ Ce composant fait le pont entre les données brutes du capteur ToF et le format 
              ▼
 ┌──────────────────────────┐
 │   mw_scan_builder        │
-│  ┌────────────────────┐  │
-│  │ scan_builder_init()│  │
-│  │ scan_builder_fill()│  │
-│  └────────────────────┘  │
+│  ┌──────────────────────────┐  │
+│  │ mw_scan_builder_init() │  │
+│  │ mw_scan_builder_fill() │  │
+│  └──────────────────────────┘  │
 └────────────┬─────────────┘
              │
              ▼
@@ -55,7 +55,7 @@ typedef struct {
     float time_increment;   // Temps entre mesures (s)
 
     const char *frame_id;   // Frame ROS
-} scan_config_t;
+} mw_scan_builder_config_t;
 
 typedef struct {
     float *ranges_buffer;
@@ -64,23 +64,24 @@ typedef struct {
     size_t frame_id_capacity;
     bool owns_ranges_buffer;
     bool owns_frame_id_buffer;
-} scan_builder_storage_t;
+} mw_scan_builder_storage_t;
 ```
 
 ### Fonctions
 
 ```c
-bool scan_builder_init(sensor_msgs__msg__LaserScan *msg,
-                       const scan_config_t *cfg,
-                       scan_builder_storage_t *storage);
+esp_err_t mw_scan_builder_init(sensor_msgs__msg__LaserScan *msg,
+                                const mw_scan_builder_config_t *cfg,
+                                mw_scan_builder_storage_t *storage);
 
-void scan_builder_deinit(sensor_msgs__msg__LaserScan *msg,
-                          scan_builder_storage_t *storage);
+esp_err_t mw_scan_builder_deinit(sensor_msgs__msg__LaserScan *msg,
+                                  mw_scan_builder_storage_t *storage);
 
-void scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
-                       const scan_config_t *cfg,
-                       const tof_sample_t samples[TOF_COUNT],
-                       const tof_hw_config_t *hw_cfg);
+esp_err_t mw_scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
+                                const mw_scan_builder_config_t *cfg,
+                                const tof_sample_t *samples,
+                                const tof_hw_config_t *hw_cfg,
+                                uint8_t sensor_count);
 ```
 
 ## Exemple d'utilisation
@@ -91,7 +92,7 @@ void scan_builder_fill(sensor_msgs__msg__LaserScan *msg,
 
 void app_main(void) {
     // Configuration scan
-    scan_config_t scan_cfg = {
+    mw_scan_builder_config_t scan_cfg = {
         .angle_min = -M_PI,
         .angle_inc = 2 * M_PI / 84,
         .bins = 84,
@@ -106,7 +107,7 @@ void app_main(void) {
     static float ranges_buffer[84];
     static char frame_id_buffer[32];
 
-    scan_builder_storage_t storage = {
+    mw_scan_builder_storage_t storage = {
         .ranges_buffer = ranges_buffer,
         .ranges_capacity = 84,
         .frame_id_buffer = frame_id_buffer,
@@ -119,7 +120,8 @@ void app_main(void) {
     sensor_msgs__msg__LaserScan scan_msg;
 
     // Initialiser
-    if (!scan_builder_init(&scan_msg, &scan_cfg, &storage)) {
+    esp_err_t ret = mw_scan_builder_init(&scan_msg, &scan_cfg, &storage);
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init scan builder");
         return;
     }
@@ -127,9 +129,10 @@ void app_main(void) {
     // Récupérer échantillons ToF
     tof_sample_t samples[TOF_COUNT];
     const tof_hw_config_t *hw_cfg = tof_config_get();
+    uint8_t sensor_count = TOF_COUNT;
 
     // Remplir le message
-    scan_builder_fill(&scan_msg, &scan_cfg, samples, hw_cfg);
+    mw_scan_builder_fill(&scan_msg, &scan_cfg, samples, hw_cfg, sensor_count);
 
     // Publier avec mw_uros_core...
 
