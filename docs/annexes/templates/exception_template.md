@@ -32,7 +32,7 @@ Mesures de mitigation
 - documentation
 
 Date d’expiration
-- <YYYY-MM-DD> (OBLIGATOIRE)
+- <YYYY-MM-DD> (champ requis pour compléter le modèle)
 
 Plan de sortie (remise en conformité)
 1) ...

@@ -118,7 +118,9 @@ Conditions minimales :
 
 ---
 
-## 5. Cas où une exception est STRICTEMENT INTERDITE
+## 5. Cas où une exception n’est généralement pas acceptable (selon le standard)
+
+Référence normative : `docs/standard.md` (mécanisme de dérogation et limites).
 
 ❌ Violation de la taxonomie (`drv` avec logique métier)  
 ❌ Dépendance micro-ROS hors `mw_*`  
@@ -134,7 +136,7 @@ Ces points touchent au **cœur du standard** et ne sont **jamais négociables**.
 
 ## 6. Processus formel d’exception
 
-Toute exception **DOIT** suivre le processus suivant.
+Processus recommandé pour une exception **traçable** (conforme à l’esprit du standard) :
 
 ### 6.1 Document d’exception obligatoire
 
@@ -190,9 +192,10 @@ Nom / rôle
 
 Une exception :
 
-* **DOIT** être validée au niveau architecture
-* **DOIT** être connue de la CI
-* **DOIT** être revue périodiquement
+Points attendus pour une exception correctement gérée :
+- validation au niveau architecture
+- visibilité pour la CI (si applicable)
+- revue périodique (date d’expiration ou checkpoint)
 
 Sans validation explicite → **exception invalide**.
 

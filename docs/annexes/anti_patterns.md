@@ -364,9 +364,9 @@ typedef struct {
 
 Un agent IA utilisant ce document :
 
-* DOIT s’en servir comme **catalogue d’odeurs**
-* NE DOIT PAS en déduire de nouvelles règles
-* DOIT toujours rattacher un anti-pattern à une règle du standard
+- Usage recommandé : s’en servir comme **catalogue d’odeurs** (symptômes fréquents).
+- Important : ne pas en déduire de nouvelles règles ; les règles opposables sont dans `docs/standard.md`.
+- Bonne pratique : rattacher chaque anti-pattern à une référence `STD-XXX-YYY` pour éviter toute ambiguïté.
 
 ---
 

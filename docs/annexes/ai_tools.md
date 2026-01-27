@@ -76,7 +76,7 @@ Ils sont :
 
 docs/ai/
 ├── README.md                 # Vue d’ensemble IA
-├── prompt_project.md         # Prompt racine (OBLIGATOIRE)
+├── prompt_project.md         # Prompt racine (recommandé pour standardiser les agents)
 ├── prompt_component.md       # Travail sur un composant
 ├── prompt_audit.md           # Audit / refactor
 └── prompt_tests.md           # Tests unitaires
@@ -104,7 +104,7 @@ Aligner **toute IA** sur le cadre global du framework.
 Tu interviens sur le framework iobewi-idf-components.
 
 Ce projet est régi par un standard technique opposable.
-Toute production DOIT respecter :
+Pour produire du code **conforme au standard** (`docs/standard.md`), il est attendu que :
 
 - docs/standard.md (NORMATIF)
 - la taxonomie drv_* → lib_* → mw_* → app_*

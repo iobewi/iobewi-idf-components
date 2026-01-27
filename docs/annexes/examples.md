@@ -83,19 +83,19 @@ Rappels pratiques :
 components/iobewi_driver_vl53l0x/
 examples/iobewi_driver_vl53l0x/basic_app/
 
-````
+```
 
 * L’exemple inclut via l’alias API `<component_api>` :
 
 ```c
 #include "drv_vl53l0x/drv_vl53l0x.h"
-````
+```
 
 ---
 
 ## 5. `main.c` — Bonnes pratiques
 
-### Ce que `main.c` DOIT faire
+### Ce que `main.c` fait généralement (selon le standard)
 
 * inclure l’API publique :
 
@@ -111,7 +111,7 @@ examples/iobewi_driver_vl53l0x/basic_app/
 
 * produire quelques logs **courts** et **observables**
 
-### Ce que `main.c` NE DOIT PAS faire
+### Ce que `main.c` évite généralement (selon le standard)
 
 * accéder à des structures internes
 * utiliser des fonctions non documentées / non publiques
