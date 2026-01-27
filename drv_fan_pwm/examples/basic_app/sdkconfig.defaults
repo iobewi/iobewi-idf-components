@@ -1,0 +1,4 @@
+# Par défaut on ne force rien.
+# Tu peux ajouter ici des options de log si tu veux.
+# Exemple:
+# CONFIG_LOG_DEFAULT_LEVEL_INFO=y
