@@ -54,16 +54,16 @@ typedef drv_vl53l0x_slot_t vl53l0x_slot_t;
  * @param scl SCL GPIO.
  * @param clk_hz I2C frequency (typically 400000).
  */
-esp_err_t vl53l0x_i2c_master_init(gpio_num_t sda,
-                                 gpio_num_t scl,
-                                 uint32_t clk_hz);
+esp_err_t drv_vl53l0x_i2c_init(gpio_num_t sda,
+                               gpio_num_t scl,
+                               uint32_t clk_hz);
 
 /**
  * @brief Probes an I2C address (ACK/NACK).
  *
  * @param addr_7b 7-bit address.
  */
-esp_err_t vl53l0x_i2c_probe(uint8_t addr_7b);
+esp_err_t drv_vl53l0x_probe(uint8_t addr_7b);
 
 /* =========================
  *  I2C – primitives used by the ST platform layer
@@ -72,20 +72,20 @@ esp_err_t vl53l0x_i2c_probe(uint8_t addr_7b);
 /**
  * @brief I2C register write (used by the ST API).
  */
-esp_err_t vl53l0x_i2c_write_reg(uint8_t addr_7b,
-                               uint8_t reg,
-                               const uint8_t *data,
-                               size_t len,
-                               uint32_t clk_hz);
+esp_err_t drv_vl53l0x_write_reg(uint8_t addr_7b,
+                                uint8_t reg,
+                                const uint8_t *data,
+                                size_t len,
+                                uint32_t clk_hz);
 
 /**
  * @brief I2C register read (used by the ST API).
  */
-esp_err_t vl53l0x_i2c_read_reg(uint8_t addr_7b,
-                              uint8_t reg,
-                              uint8_t *data,
-                              size_t len,
-                              uint32_t clk_hz);
+esp_err_t drv_vl53l0x_read_reg(uint8_t addr_7b,
+                               uint8_t reg,
+                               uint8_t *data,
+                               size_t len,
+                               uint32_t clk_hz);
 
 /* =========================
  *  Multi-sensor (XSHUT)
@@ -103,9 +103,9 @@ esp_err_t vl53l0x_i2c_read_reg(uint8_t addr_7b,
  * @param slot_count Number of sensors.
  * @param boot_delay_ms Delay after XSHUT release (typ. 2–10 ms).
  */
-esp_err_t vl53l0x_multi_assign_addresses(const vl53l0x_slot_t *slots,
-                                        int slot_count,
-                                        uint32_t boot_delay_ms);
+esp_err_t drv_vl53l0x_multi_assign(const drv_vl53l0x_slot_t *slots,
+                                   int slot_count,
+                                   uint32_t boot_delay_ms);
 
 /* =========================
  *  Sensor – high-level API
@@ -117,8 +117,8 @@ esp_err_t vl53l0x_multi_assign_addresses(const vl53l0x_slot_t *slots,
  * @param dev Sensor handle.
  * @param timing_budget_us Measurement budget in microseconds (e.g., 33000).
  */
-esp_err_t vl53l0x_init(vl53l0x_dev_t *dev,
-                       uint32_t timing_budget_us);
+esp_err_t drv_vl53l0x_init(drv_vl53l0x_dev_t *dev,
+                           uint32_t timing_budget_us);
 
 /**
  * @brief Performs a distance measurement (mm).
@@ -126,8 +126,8 @@ esp_err_t vl53l0x_init(vl53l0x_dev_t *dev,
  * @param dev Sensor handle.
  * @param out_mm Measured distance in millimeters.
  */
-esp_err_t vl53l0x_read_mm(vl53l0x_dev_t *dev,
-                          uint16_t *out_mm);
+esp_err_t drv_vl53l0x_read(drv_vl53l0x_dev_t *dev,
+                           uint16_t *out_mm);
 
 /**
  * @brief Enables the GPIO "data ready" mode (GPIO/INT).
@@ -139,9 +139,9 @@ esp_err_t vl53l0x_read_mm(vl53l0x_dev_t *dev,
  * @param int_gpio ESP-IDF GPIO connected to the VL53L0X GPIO/INT pin.
  * @param active_high True if the signal is active high.
  */
-esp_err_t vl53l0x_enable_gpio_ready(vl53l0x_dev_t *dev,
-                                   gpio_num_t int_gpio,
-                                   bool active_high);
+esp_err_t drv_vl53l0x_enable_gpio_ready(drv_vl53l0x_dev_t *dev,
+                                        gpio_num_t int_gpio,
+                                        bool active_high);
 
 /**
  * @brief Waits for a GPIO "data ready" edge.
@@ -149,8 +149,22 @@ esp_err_t vl53l0x_enable_gpio_ready(vl53l0x_dev_t *dev,
  * @param dev Sensor handle.
  * @param timeout FreeRTOS timeout (ticks).
  */
-esp_err_t vl53l0x_wait_gpio_ready(vl53l0x_dev_t *dev,
-                                 TickType_t timeout);
+esp_err_t drv_vl53l0x_wait_gpio_ready(drv_vl53l0x_dev_t *dev,
+                                      TickType_t timeout);
+
+/* =========================
+ *  Backward compatibility aliases
+ * ========================= */
+
+#define vl53l0x_i2c_master_init drv_vl53l0x_i2c_init
+#define vl53l0x_i2c_probe drv_vl53l0x_probe
+#define vl53l0x_i2c_write_reg drv_vl53l0x_write_reg
+#define vl53l0x_i2c_read_reg drv_vl53l0x_read_reg
+#define vl53l0x_multi_assign_addresses drv_vl53l0x_multi_assign
+#define vl53l0x_init drv_vl53l0x_init
+#define vl53l0x_read_mm drv_vl53l0x_read
+#define vl53l0x_enable_gpio_ready drv_vl53l0x_enable_gpio_ready
+#define vl53l0x_wait_gpio_ready drv_vl53l0x_wait_gpio_ready
 
 #ifdef __cplusplus
 }

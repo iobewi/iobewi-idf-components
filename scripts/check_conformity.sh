@@ -64,7 +64,7 @@ for comp in drv_* lib_* mw_* app_*; do
     # 3. Vérifier nommage des fonctions publiques
     if [ -f "$api_h" ]; then
         funcs=$(grep -h "^esp_err_t\|^bool\|^void" "${comp}/include/${comp}/"*.h 2>/dev/null | \
-                grep -o '[a-z_]*(' | sed 's/($//' || true)
+                grep -o '[a-z_0-9]*(' | sed 's/($//' || true)
 
         if [ -n "$funcs" ]; then
             incorrect=0

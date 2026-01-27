@@ -64,7 +64,7 @@ static esp_err_t st_init_sequence(VL53L0X_Dev_t *pDevice, uint32_t timing_budget
 
 static void IRAM_ATTR vl53l0x_gpio_isr_handler(void *arg)
 {
-    vl53l0x_dev_t *dev = (vl53l0x_dev_t *)arg;
+    drv_vl53l0x_dev_t *dev = (drv_vl53l0x_dev_t *)arg;
     BaseType_t task_woken = pdFALSE;
 
     if (dev && dev->gpio_ready_sem) {
@@ -80,7 +80,7 @@ static void IRAM_ATTR vl53l0x_gpio_isr_handler(void *arg)
  *  Multi-sensor address assign using XSHUT
  * ========================= */
 
-esp_err_t vl53l0x_multi_assign_addresses(const vl53l0x_slot_t *slots,
+esp_err_t drv_vl53l0x_multi_assign(const drv_vl53l0x_slot_t *slots,
                                         int slot_count,
                                         uint32_t boot_delay_ms)
 {
@@ -167,7 +167,7 @@ esp_err_t vl53l0x_multi_assign_addresses(const vl53l0x_slot_t *slots,
  *  Public sensor API
  * ========================= */
 
-esp_err_t vl53l0x_init(vl53l0x_dev_t *dev, uint32_t timing_budget_us)
+esp_err_t drv_vl53l0x_init(drv_vl53l0x_dev_t *dev, uint32_t timing_budget_us)
 {
     if (!dev) return ESP_ERR_INVALID_ARG;
 
@@ -200,7 +200,7 @@ esp_err_t vl53l0x_init(vl53l0x_dev_t *dev, uint32_t timing_budget_us)
     return ESP_OK;
 }
 
-esp_err_t vl53l0x_read_mm(vl53l0x_dev_t *dev, uint16_t *mm)
+esp_err_t drv_vl53l0x_read(drv_vl53l0x_dev_t *dev, uint16_t *mm)
 {
     if (!dev || !mm) return ESP_ERR_INVALID_ARG;
     if (!dev->inited) return ESP_ERR_INVALID_STATE;
@@ -226,7 +226,7 @@ esp_err_t vl53l0x_read_mm(vl53l0x_dev_t *dev, uint16_t *mm)
     return ESP_OK;
 }
 
-esp_err_t vl53l0x_enable_gpio_ready(vl53l0x_dev_t *dev,
+esp_err_t drv_vl53l0x_enable_gpio_ready(drv_vl53l0x_dev_t *dev,
                                    gpio_num_t int_gpio,
                                    bool active_high)
 {
@@ -294,7 +294,7 @@ esp_err_t vl53l0x_enable_gpio_ready(vl53l0x_dev_t *dev,
     return ESP_OK;
 }
 
-esp_err_t vl53l0x_wait_gpio_ready(vl53l0x_dev_t *dev, TickType_t timeout)
+esp_err_t drv_vl53l0x_wait_gpio_ready(drv_vl53l0x_dev_t *dev, TickType_t timeout)
 {
     if (!dev) return ESP_ERR_INVALID_ARG;
     if (!dev->gpio_ready_enabled || !dev->gpio_ready_sem) {
