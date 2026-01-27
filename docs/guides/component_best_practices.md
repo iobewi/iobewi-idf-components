@@ -1,6 +1,6 @@
 # 📘 Guide des Bonnes Pratiques - Composants iobewi-idf-components
 
-**Version 1.0** | Référence pour la création et l'harmonisation des composants
+**Version 1.1** | Référence pour la création et l'harmonisation des composants
 
 Ce document définit les **bonnes pratiques obligatoires** pour tous les composants du framework `iobewi-idf-components`. Il sert de référence pour :
 - ✅ Créer de nouveaux composants conformes
@@ -15,6 +15,24 @@ Ce document définit les **bonnes pratiques obligatoires** pour tous les composa
 2. **Maintenabilité** : Code industriel avec ≥ 5 ans de durée de vie
 3. **Conformité CDC** : Respect strict du Cahier des Charges
 4. **Zéro dette technique** : Qualité sans compromis
+
+---
+
+## 📁 Note sur la Structure du Projet
+
+Ce guide utilise la **double nomenclature** du framework :
+
+- **Noms de répertoires** : `iobewi_driver_*`, `iobewi_libs_*`, `iobewi_mw_*`, `iobewi_apps_*`
+- **Chemins include et API** : `drv_*`, `lib_*`, `mw_*`, `app_*`
+
+**Exemple** :
+- Répertoire : `components/iobewi_driver_vl53l0x/`
+- Include : `#include "drv_vl53l0x/drv_vl53l0x.h"`
+- API : `drv_vl53l0x_init()`
+
+Pour une explication complète, consultez le [Guide de Structure des Répertoires](directory_structure.md).
+
+Dans ce document, `<component_name>` fait référence au **nom API court** (ex: `drv_vl53l0x`), pas au nom de répertoire.
 
 ---
 
@@ -38,27 +56,47 @@ Ce document définit les **bonnes pratiques obligatoires** pour tous les composa
 
 ### Structure Obligatoire
 
+**Note** : `<component_dir>` = nom de répertoire (ex: `iobewi_driver_vl53l0x`)
+**Note** : `<component_name>` = nom API court (ex: `drv_vl53l0x`)
+
 ```
-<component_name>/
-├── CMakeLists.txt              # ✅ OBLIGATOIRE
-├── idf_component.yml           # ✅ OBLIGATOIRE
-├── README.md                   # ✅ OBLIGATOIRE
-├── Kconfig                     # ⚠️ OPTIONNEL (si configuration nécessaire)
+components/<component_dir>/          # Ex: components/iobewi_driver_vl53l0x/
+├── CMakeLists.txt                   # ✅ OBLIGATOIRE
+├── idf_component.yml                # ✅ OBLIGATOIRE
+├── README.md                        # ✅ OBLIGATOIRE
+├── Kconfig                          # ⚠️ OPTIONNEL (si configuration nécessaire)
 ├── include/
-│   └── <component_name>/       # ✅ OBLIGATOIRE : namespace isolé
-│       ├── <component_name>.h          # ✅ OBLIGATOIRE : API publique
-│       └── <component_name>_types.h    # ✅ OBLIGATOIRE : Types publics
-├── src/
-│   └── <component_name>.c      # ✅ OBLIGATOIRE : Implémentation
-└── examples/
-    └── basic_app/              # ✅ OBLIGATOIRE : Exemple fonctionnel
+│   └── <component_name>/            # ✅ OBLIGATOIRE : namespace isolé (ex: drv_vl53l0x/)
+│       ├── <component_name>.h               # ✅ OBLIGATOIRE : API publique
+│       └── <component_name>_types.h         # ✅ OBLIGATOIRE : Types publics
+└── src/
+    └── <component_name>.c           # ✅ OBLIGATOIRE : Implémentation
+
+examples/<component_dir>/            # Ex: examples/iobewi_driver_vl53l0x/
+└── basic_app/                       # ✅ OBLIGATOIRE : Exemple fonctionnel
+    ├── CMakeLists.txt               # Pointe vers ../../components
+    ├── sdkconfig.defaults
+    ├── README.md                    # ⚠️ RECOMMANDÉ
+    └── main/
         ├── CMakeLists.txt
-        ├── sdkconfig.defaults
-        ├── README.md           # ⚠️ RECOMMANDÉ
-        └── main/
-            ├── CMakeLists.txt
-            ├── main.c
-            └── Kconfig.projbuild  # ⚠️ OPTIONNEL
+        ├── main.c
+        └── Kconfig.projbuild        # ⚠️ OPTIONNEL
+```
+
+**Exemple concret** : `drv_vl53l0x` (Driver VL53L0X ToF)
+```
+components/iobewi_driver_vl53l0x/    # Répertoire avec préfixe iobewi_
+├── include/
+│   └── drv_vl53l0x/                 # Namespace API (forme courte)
+│       ├── drv_vl53l0x.h
+│       └── drv_vl53l0x_types.h
+└── src/
+    └── vl53l0x_driver.c
+
+examples/iobewi_driver_vl53l0x/
+└── basic_app/
+    └── main/
+        └── main.c                   # #include "drv_vl53l0x/drv_vl53l0x.h"
 ```
 
 ### Règles Strictes
@@ -97,7 +135,13 @@ Ce document définit les **bonnes pratiques obligatoires** pour tous les composa
 drv_*  →  lib_*  →  mw_*  →  app_*
 ```
 
+**Note** : Cette règle s'applique aux **noms API**, pas aux noms de répertoires.
+
 ### 🔧 `drv_*` — Drivers Matériels
+
+**Répertoire** : `components/iobewi_driver_*/`
+**API** : `drv_*_*()`
+**Include** : `drv_*/drv_*.h`
 
 **Responsabilité** : Pilotage matériel pur (I2C, SPI, GPIO, UART…)
 
@@ -112,6 +156,8 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - ❌ **Abstractions de haut niveau** : Pas de "provider", "manager", "snapshot"
 
 **Exemple conforme** : `drv_a02yyuw`
+- Répertoire : `components/iobewi_driver_a02yyuw/`
+- Include : `#include "drv_a02yyuw/drv_a02yyuw.h"`
 - Gère UART, GPIO EN, GPIO Mode
 - Retourne distance brute en millimètres
 - Pas de filtrage, pas de conversion
@@ -122,6 +168,10 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - ❌ Contient `tof_snapshot.h` (utilities lib-like)
 
 ### 📚 `lib_*` — Bibliothèques Utilitaires
+
+**Répertoire** : `components/iobewi_libs_*/`
+**API** : `lib_*_*()`
+**Include** : `lib_*/lib_*.h`
 
 **Responsabilité** : Code réutilisable générique sans micro-ROS
 
@@ -136,6 +186,8 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - ❌ **Dépendance micro-ROS** : Aucun include de rcl/rclc
 
 **Exemple conforme** : `lib_a02_provider`
+- Répertoire : `components/iobewi_libs_a02_provider/`
+- Include : `#include "lib_a02_provider/lib_a02_provider.h"`
 - Utilise `drv_a02yyuw` pour accéder aux capteurs
 - Implémente filtrage médian
 - Retourne échantillons avec métadonnées
@@ -146,6 +198,10 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - `tof_snapshot` : Utilitaires snapshot → devrait être dans `lib_*`
 
 ### 🔌 `mw_*` — Middleware micro-ROS
+
+**Répertoire** : `components/iobewi_mw_*/`
+**API** : `mw_*_*()`
+**Include** : `mw_*/mw_*.h`
 
 **Responsabilité** : Intégration micro-ROS (builders, helpers rcl/rclc)
 
@@ -160,14 +216,22 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - ❌ **Logique applicative** : Pas d'orchestration métier
 
 **Exemple conforme** : `mw_scan_builder`
+- Répertoire : `components/iobewi_mw_scan_builder/`
+- Include : `#include "mw_scan_builder/mw_scan_builder.h"`
 - Builder générique pour `sensor_msgs/LaserScan`
 - Pas de connaissance des capteurs spécifiques
 
 **Exemple conforme** : `mw_uros_core`
+- Répertoire : `components/iobewi_mw_uros_core/`
+- Include : `#include "mw_uros_core/mw_uros_core.h"`
 - Infrastructure micro-ROS générique
 - Gestion connexion, pub/sub, LED status
 
 ### 🚀 `app_*` — Composants Métier
+
+**Répertoire** : `components/iobewi_apps_*/`
+**API** : `app_*_*()`
+**Include** : `app_*/app_*.h`
 
 **Responsabilité** : Logique fonctionnelle réutilisable
 
@@ -180,6 +244,8 @@ drv_*  →  lib_*  →  mw_*  →  app_*
 - ❌ **Paramètres hardcodés** : Tout doit être configurable
 
 **Exemple conforme** : `app_scan_ultra`
+- Répertoire : `components/iobewi_apps_scan_ultra/`
+- Include : `#include "app_scan_ultra/app_scan_ultra.h"`
 - Orchestre `lib_a02_provider` + `mw_uros_core`
 - Configuration flexible (bins, angles, mapping)
 - Remplit directement `sensor_msgs/LaserScan`
@@ -519,21 +585,30 @@ idf_component_register(
 ```cmake
 cmake_minimum_required(VERSION 3.16)
 
-# ✅ BON : Charger uniquement le composant nécessaire
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../..")
+# ✅ BON : Charger tous les composants depuis components/
+# L'exemple est dans examples/iobewi_driver_xxx/basic_app/
+# Les composants sont dans components/
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(<example_name>)
 ```
 
-### ❌ Anti-Pattern : Charger Tous les Composants
+**Chemin relatif** :
+- Exemple : `examples/iobewi_driver_vl53l0x/basic_app/CMakeLists.txt`
+- Pointe vers : `../../components` (remonte 2 niveaux, puis entre dans components/)
+- ESP-IDF détecte : `components/iobewi_driver_vl53l0x/` et tous les autres composants
+
+**Note** : ESP-IDF charge automatiquement tous les composants dans `EXTRA_COMPONENT_DIRS`, mais n'inclut que ceux déclarés dans `REQUIRES` de votre main/CMakeLists.txt.
+
+### ❌ Anti-Pattern : Chemin Incorrect
 
 ```cmake
-# ❌ MAUVAIS : Charge TOUT le framework (y compris micro-ROS)
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../..")
+# ❌ MAUVAIS : Pointe vers un composant spécifique
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/iobewi_driver_vl53l0x")
 ```
 
-**Conséquence** : Force l'exemple à dépendre de micro-ROS même si pas nécessaire
+**Conséquence** : Ne peut pas accéder aux dépendances du composant (ex: lib_*, mw_*)
 
 ---
 
@@ -711,11 +786,15 @@ Utilisez cette checklist pour auditer un composant existant ou valider un nouvea
 #### `drv_a02yyuw` — Driver Conforme
 
 ```
-drv_a02yyuw/
-├── include/drv_a02yyuw/
+components/iobewi_driver_a02yyuw/       # Répertoire avec préfixe iobewi_
+├── include/drv_a02yyuw/                # Namespace API (forme courte)
 │   ├── drv_a02yyuw_types.h    ✅ Types séparés
 │   └── drv_a02yyuw.h          ✅ API séparée
 └── src/drv_a02yyuw.c          ✅ Implémentation unique
+
+examples/iobewi_driver_a02yyuw/
+└── basic_app/
+    └── main/main.c            # #include "drv_a02yyuw/drv_a02yyuw.h"
 ```
 
 **Points forts** :
@@ -723,15 +802,20 @@ drv_a02yyuw/
 - ✅ Pas de logique métier (juste pilotage UART/GPIO)
 - ✅ Nommage cohérent : `drv_a02yyuw_*`
 - ✅ Pas de dépendance micro-ROS
+- ✅ Double nomenclature respectée (répertoire iobewi_, API drv_)
 
 #### `lib_a02_provider` — Library Conforme
 
 ```
-lib_a02_provider/
-├── include/lib_a02_provider/
+components/iobewi_libs_a02_provider/    # Répertoire avec préfixe iobewi_
+├── include/lib_a02_provider/           # Namespace API (forme courte)
 │   ├── lib_a02_provider_types.h    ✅ Types séparés
 │   └── lib_a02_provider.h          ✅ API séparée
 └── src/lib_a02_provider.c          ✅ Implémentation unique
+
+examples/iobewi_libs_a02_provider/
+└── basic_app/
+    └── main/main.c            # #include "lib_a02_provider/lib_a02_provider.h"
 ```
 
 **Points forts** :
@@ -739,21 +823,27 @@ lib_a02_provider/
 - ✅ Filtrage médian (logique métier) dans `lib_*` (pas `drv_*`)
 - ✅ Utilise `drv_a02yyuw` sans accès matériel direct
 - ✅ Pas de dépendance micro-ROS
+- ✅ Double nomenclature respectée
 
 #### `app_scan_ultra` — Application Conforme
 
 ```
-app_scan_ultra/
-├── include/app_scan_ultra/
+components/iobewi_apps_scan_ultra/      # Répertoire avec préfixe iobewi_
+├── include/app_scan_ultra/             # Namespace API (forme courte)
 │   ├── app_scan_ultra_types.h    ✅ Types séparés
 │   └── app_scan_ultra.h          ✅ API séparée
 └── src/app_scan_ultra.c          ✅ Implémentation unique
+
+examples/iobewi_apps_scan_ultra/
+└── basic_app/
+    └── main/main.c            # #include "app_scan_ultra/app_scan_ultra.h"
 ```
 
 **Points forts** :
 - ✅ Orchestration propre : `lib_a02_provider` + `mw_uros_core`
 - ✅ Configuration flexible (bins, angles, mapping)
 - ✅ Pas de hardcode
+- ✅ Double nomenclature respectée
 
 ---
 
@@ -762,7 +852,7 @@ app_scan_ultra/
 #### `drv_vl53l0x` — Driver Non-Conforme
 
 ```
-drv_vl53l0x/
+components/iobewi_driver_vl53l0x/
 ├── include/drv_vl53l0x/
 │   ├── drv_vl53l0x.h        ✅ OK
 │   ├── tof_config.h         ❌ Abstraction lib-like dans driver
@@ -790,22 +880,26 @@ drv_vl53l0x/
 **Refactorisation nécessaire** :
 
 ```
-AVANT (non-conforme)           APRÈS (conforme)
-────────────────────           ────────────────
-drv_vl53l0x/                   drv_vl53l0x/
-├── tof_provider.h       ──→   ├── drv_vl53l0x_types.h  ✅
-├── tof_config.h               └── drv_vl53l0x.h        ✅
-├── tof_snapshot.h
-└── drv_vl53l0x.h              lib_vl53l0x_provider/    ✅ NOUVEAU
-                               ├── lib_vl53l0x_provider_types.h
-                               └── lib_vl53l0x_provider.h
-                                   (contient tof_provider, tof_config, tof_snapshot)
+AVANT (non-conforme)                              APRÈS (conforme)
+────────────────────                              ────────────────
+components/iobewi_driver_vl53l0x/                components/iobewi_driver_vl53l0x/
+├── include/drv_vl53l0x/                          ├── include/drv_vl53l0x/
+│   ├── tof_provider.h       ──────────────┐      │   ├── drv_vl53l0x_types.h  ✅
+│   ├── tof_config.h                       │      │   └── drv_vl53l0x.h        ✅
+│   ├── tof_snapshot.h                     │      └── src/vl53l0x_driver.c
+│   └── drv_vl53l0x.h                      │
+└── src/                                   │      components/iobewi_libs_vl53l0x_provider/  ✅ NOUVEAU
+    ├── tof_provider.c     ────────────────┘      ├── include/lib_vl53l0x_provider/
+    ├── tof_config.c                              │   ├── lib_vl53l0x_provider_types.h
+    ├── tof_snapshot.c                            │   └── lib_vl53l0x_provider.h
+    └── drv_vl53l0x.c                             └── src/lib_vl53l0x_provider.c
+                                                      (contient tof_provider, tof_config, tof_snapshot)
 ```
 
 #### `app_scan_tof` — Application Non-Conforme
 
 ```
-app_scan_tof/
+components/iobewi_apps_scan_tof/
 ├── include/app_scan_tof/
 │   └── scan_engine.h        ❌ Pas de types header
 └── src/scan_engine.c
@@ -823,13 +917,13 @@ app_scan_tof/
 **Refactorisation nécessaire** :
 
 ```
-AVANT (non-conforme)           APRÈS (conforme)
-────────────────────           ────────────────
-app_scan_tof/                  app_scan_tof/
-├── include/app_scan_tof/      ├── include/app_scan_tof/
-│   └── scan_engine.h    ──→   │   ├── app_scan_tof_types.h  ✅
-└── src/scan_engine.c          │   └── app_scan_tof.h        ✅
-                               └── src/app_scan_tof.c         ✅
+AVANT (non-conforme)                              APRÈS (conforme)
+────────────────────                              ────────────────
+components/iobewi_apps_scan_tof/                 components/iobewi_apps_scan_tof/
+├── include/app_scan_tof/                         ├── include/app_scan_tof/
+│   └── scan_engine.h    ────────────────┐        │   ├── app_scan_tof_types.h  ✅
+└── src/scan_engine.c                    │        │   └── app_scan_tof.h        ✅
+                                         └────────└── src/app_scan_tof.c         ✅
 ```
 
 **Renommage nécessaire** :
@@ -942,17 +1036,18 @@ app_scan_tof/                  app_scan_tof/
 
 ### Règles d'Or
 
-1. **2 Headers Obligatoires** : `*_types.h` + `*.h`
-2. **Handle Opaque** : Struct privée dans `.c`
-3. **Préfixe Partout** : `<component>_*` sur tous les symboles publics
-4. **Taxonomie Stricte** : `drv_*` (hardware) → `lib_*` (logic) → `mw_*` (micro-ROS) → `app_*` (orchestration)
-5. **Pas de Pollution** : Drivers sans logique métier, libs sans matériel, mw sans app logic
+1. **Double Nomenclature** : Répertoires `iobewi_*`, API `drv_*/lib_*/mw_*/app_*`
+2. **2 Headers Obligatoires** : `*_types.h` + `*.h`
+3. **Handle Opaque** : Struct privée dans `.c`
+4. **Préfixe Partout** : `<component>_*` sur tous les symboles publics
+5. **Taxonomie Stricte** : `drv_*` (hardware) → `lib_*` (logic) → `mw_*` (micro-ROS) → `app_*` (orchestration)
+6. **Pas de Pollution** : Drivers sans logique métier, libs sans matériel, mw sans app logic
 
 ### Composants Références (100% Conformes)
 
-- ✅ `drv_a02yyuw`
-- ✅ `lib_a02_provider`
-- ✅ `app_scan_ultra`
+- ✅ `drv_a02yyuw` (répertoire: `iobewi_driver_a02yyuw`)
+- ✅ `lib_a02_provider` (répertoire: `iobewi_libs_a02_provider`)
+- ✅ `app_scan_ultra` (répertoire: `iobewi_apps_scan_ultra`)
 
 **Utilisez ces composants comme templates pour nouveaux composants**
 
@@ -968,9 +1063,10 @@ app_scan_tof/                  app_scan_tof/
 
 Pour toute question sur ce guide :
 - 📚 Lire le [CDC](cdc.md)
+- 📁 Consulter le [Guide de Structure des Répertoires](directory_structure.md)
 - 🔍 Examiner les composants conformes (drv_a02yyuw, lib_a02_provider, app_scan_ultra)
 - 💬 Ouvrir une discussion sur le dépôt
 
 ---
 
-**Version 1.0** | Dernière mise à jour : 2026-01-26
+**Version 1.1** | Dernière mise à jour : 2026-01-27

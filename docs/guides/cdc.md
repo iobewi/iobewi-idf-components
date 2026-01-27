@@ -36,6 +36,51 @@ Le framework **iobewi-idf-components** vise à :
 
 Tout autre framework est interdit sans validation explicite.
 
+### 3.2 Organisation du Projet
+
+Le framework utilise une structure organisée avec séparation des composants et exemples :
+
+```
+iobewi-idf-components/
+├── components/              # Code source des composants
+├── examples/                # Applications d'exemple
+├── docs/                    # Documentation
+└── tools/                   # Scripts et outils
+```
+
+### 3.3 Convention de Nommage - Double Nomenclature
+
+Le framework applique une **double nomenclature** pour allier identité de marque et concision technique :
+
+**Niveau répertoire** (Branding) :
+- Format : `iobewi_<catégorie>_<nom>`
+- Exemples : `iobewi_driver_vl53l0x`, `iobewi_libs_status_led`, `iobewi_mw_uros_core`
+
+**Niveau API** (Technique) :
+- Chemins include : `<catégorie courte>_<nom>/<catégorie courte>_<nom>.h`
+- Fonctions : `<catégorie courte>_<nom>_<action>()`
+- Types : `<catégorie courte>_<nom>_<type>_t`
+
+**Mapping catégories** :
+- `iobewi_driver_*` ↔ `drv_*`
+- `iobewi_libs_*` ↔ `lib_*`
+- `iobewi_mw_*` ↔ `mw_*`
+- `iobewi_apps_*` ↔ `app_*`
+
+**Exemple concret** :
+```
+Répertoire : components/iobewi_driver_vl53l0x/
+Include    : #include "drv_vl53l0x/drv_vl53l0x.h"
+API        : drv_vl53l0x_init(&dev)
+Types      : drv_vl53l0x_dev_t
+```
+
+**Rationale** :
+- Répertoires `iobewi_*` : identité de marque, évite conflits, origine claire
+- API `drv_*/lib_*/mw_*/app_*` : concision, conformité ESP-IDF, taxonomie explicite
+
+Voir [Guide de Structure des Répertoires](directory_structure.md) pour les détails complets.
+
 ---
 
 ## 4. Taxonomie des composants (OBLIGATOIRE)
@@ -101,33 +146,56 @@ Toute dépendance inverse est strictement interdite.
 
 ### 5.1 Arborescence obligatoire
 
+**Note** : `<component_dir>` = nom de répertoire (ex: `iobewi_driver_vl53l0x`)
+**Note** : `<component_name>` = nom API court (ex: `drv_vl53l0x`)
+
+```
+components/<component_dir>/          # Ex: components/iobewi_driver_vl53l0x/
+├── CMakeLists.txt
+├── idf_component.yml
+├── README.md
+├── Kconfig                          # (optionnel)
+├── include/
+│   └── <component_name>/            # Ex: drv_vl53l0x/
+│       ├── <component_name>.h       # Ex: drv_vl53l0x.h
+│       └── <component_name>_types.h # Ex: drv_vl53l0x_types.h
+└── src/
+    └── <component_name>.c           # Ex: vl53l0x_driver.c
+
+examples/<component_dir>/            # Ex: examples/iobewi_driver_vl53l0x/
+└── basic_app/
+    ├── CMakeLists.txt               # Pointe vers ../../components
+    ├── sdkconfig.defaults
+    ├── README.md
+    └── main/
+        ├── CMakeLists.txt
+        └── main.c                   # #include "drv_vl53l0x/drv_vl53l0x.h"
 ```
 
-components/iobewi/<component_name>/
-CMakeLists.txt
-idf_component.yml
-README.md
-Kconfig                (optionnel)
-include/
-<component_name>/
-<component_name>.h
-<component_name>_types.h
-src/
-<component_name>.c
-examples/
-basic_app/
-CMakeLists.txt
-sdkconfig.defaults
-main/
-main.c
+**Exemple concret** : Composant `drv_vl53l0x`
+```
+components/iobewi_driver_vl53l0x/    # Répertoire avec préfixe iobewi_
+├── include/
+│   └── drv_vl53l0x/                 # Namespace API (forme courte)
+│       ├── drv_vl53l0x.h
+│       └── drv_vl53l0x_types.h
+└── src/
+    └── vl53l0x_driver.c
 
+examples/iobewi_driver_vl53l0x/
+└── basic_app/
+    └── main/
+        └── main.c                   # #include "drv_vl53l0x/drv_vl53l0x.h"
 ```
 
 ### 5.2 Règles strictes
 
-- Un composant = un dossier
+- Un composant = un dossier dans `components/`
+- Nom de répertoire : format `iobewi_<catégorie>_<nom>`
+- Namespace include : format `<catégorie courte>_<nom>/`
 - Un seul `CMakeLists.txt` par composant
-- `examples/basic_app` obligatoire
+- `examples/<component_dir>/basic_app` obligatoire
+- Exemples pointent vers `../../components` via `EXTRA_COMPONENT_DIRS`
 - Aucun code métier hors de `app_*`
 - Aucun accès matériel hors de `drv_*`
 

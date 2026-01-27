@@ -21,6 +21,43 @@ Le framework **iobewi-idf-components** fournit :
 
 ---
 
+## 📁 Structure du Projet
+
+Le framework utilise une **double nomenclature** pour combiner clarté et concision :
+
+```
+iobewi-idf-components/
+├── components/              # Code source des composants
+│   ├── iobewi_driver_*/     # Drivers matériels (noms répertoires)
+│   ├── iobewi_libs_*/       # Bibliothèques utilitaires
+│   ├── iobewi_mw_*/         # Middleware micro-ROS
+│   └── iobewi_apps_*/       # Applications métier
+├── examples/                # Applications d'exemple
+│   ├── iobewi_driver_*/
+│   ├── iobewi_libs_*/
+│   ├── iobewi_mw_*/
+│   └── iobewi_apps_*/
+├── docs/                    # Documentation
+└── tools/                   # Scripts et outils
+```
+
+### Convention de Nommage
+
+- **Répertoires** : `iobewi_<catégorie>_<nom>` (ex: `iobewi_driver_vl53l0x`)
+- **API** : `<catégorie courte>_<nom>_*()` (ex: `drv_vl53l0x_init()`)
+- **Include** : `#include "<catégorie courte>_<nom>/<catégorie courte>_<nom>.h"` (ex: `#include "drv_vl53l0x/drv_vl53l0x.h"`)
+
+**Exemple concret** :
+```
+Répertoire : components/iobewi_driver_vl53l0x/
+Include    : #include "drv_vl53l0x/drv_vl53l0x.h"
+API        : drv_vl53l0x_init(&dev)
+```
+
+Pour plus de détails, consultez le [Guide de Structure des Répertoires](docs/guides/directory_structure.md).
+
+---
+
 ## 📚 Taxonomie des Composants
 
 Chaque composant appartient à **une seule catégorie** :
@@ -154,11 +191,8 @@ git clone https://github.com/votre-org/iobewi-idf-components.git
 # CMakeLists.txt (racine du projet)
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_SOURCE_DIR}/../iobewi-idf-components/drv_led_rgb"
-    "${CMAKE_SOURCE_DIR}/../iobewi-idf-components/lib_status_led"
-    "${CMAKE_SOURCE_DIR}/../iobewi-idf-components/mw_uros_core"
-)
+# Pointer vers le dossier components/ qui contient tous les composants
+set(EXTRA_COMPONENT_DIRS "${CMAKE_SOURCE_DIR}/../iobewi-idf-components/components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(mon_projet)
