@@ -1,5 +1,4 @@
-#include "mw_uros_transport_usb/esp_usbcdc_transport.h"
-#include "mw_uros_transport_usb/esp_usbcdc_common.h"
+#include "mw_uros_transport_usb/mw_uros_transport_usb.h"
 
 /**
  * EXCEPTION AU CDC (section 6.2) :
@@ -13,7 +12,7 @@
  */
 
 // Open USB-CDC
-bool esp_usbcdc_open(struct uxrCustomTransport* transport) {
+bool mw_uros_transport_usb_open(struct uxrCustomTransport* transport) {
     const tinyusb_config_t tinyusb_config = {
         .device_descriptor = NULL,
         .string_descriptor = NULL,
@@ -21,7 +20,7 @@ bool esp_usbcdc_open(struct uxrCustomTransport* transport) {
         .configuration_descriptor = NULL,
     };
 
-    esp_err_t ret = esp_usbcdc_tinyusb_init_once(&tinyusb_config);
+    esp_err_t ret = mw_uros_transport_usb_init(&tinyusb_config);
 
     if (ret == ESP_ERR_INVALID_ARG || ret == ESP_FAIL) {
         return false;
@@ -47,13 +46,13 @@ bool esp_usbcdc_open(struct uxrCustomTransport* transport) {
 }
 
 // Close USB-CDC
-bool esp_usbcdc_close(struct uxrCustomTransport* transport) {
+bool mw_uros_transport_usb_close(struct uxrCustomTransport* transport) {
     tinyusb_cdcacm_itf_t* cdc_port = (tinyusb_cdcacm_itf_t*)transport->args;
     return (tusb_cdc_acm_deinit(*cdc_port) == ESP_OK) ? true : false;
 }
 
 // Write to USB-CDC
-size_t esp_usbcdc_write(struct uxrCustomTransport* transport, const uint8_t* buf, size_t len, uint8_t* err) {
+size_t mw_uros_transport_usb_write(struct uxrCustomTransport* transport, const uint8_t* buf, size_t len, uint8_t* err) {
     tinyusb_cdcacm_itf_t* cdc_port = (tinyusb_cdcacm_itf_t*)transport->args;
     size_t tx_size = tinyusb_cdcacm_write_queue(*cdc_port, buf, len);
     tinyusb_cdcacm_write_flush(*cdc_port, 0);
@@ -61,7 +60,7 @@ size_t esp_usbcdc_write(struct uxrCustomTransport* transport, const uint8_t* buf
 }
 
 // Read from USB-CDC
-size_t esp_usbcdc_read(struct uxrCustomTransport* transport, uint8_t* buf, size_t len, int timeout, uint8_t* err) {
+size_t mw_uros_transport_usb_read(struct uxrCustomTransport* transport, uint8_t* buf, size_t len, int timeout, uint8_t* err) {
     tinyusb_cdcacm_itf_t* cdc_port = (tinyusb_cdcacm_itf_t*)transport->args;
     size_t rx_size = 0;
     esp_err_t ret = tinyusb_cdcacm_read(*cdc_port, buf, len, &rx_size);

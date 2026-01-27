@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "mw_uros_transport_usb/esp_usbcdc_transport.h"
-#include "mw_uros_transport_usb/esp_usbcdc_logging.h"
-#include "mw_uros_transport_usb/esp_usbcdc_common.h"
+#include "mw_uros_transport_usb/mw_uros_transport_usb.h"
 
 #include <uxr/client/transport.h>
 
@@ -29,7 +27,7 @@ void app_main(void)
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
     // Initialize USB-CDC logging (optional)
-    ret = esp_usbcdc_logging_init();
+    ret = mw_uros_transport_usb_logging_init();
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "USB-CDC logging initialized");
     } else {
@@ -40,18 +38,18 @@ void app_main(void)
     tinyusb_cdcacm_itf_t cdc_port = TINYUSB_CDC_ACM_0;
 
     // Note: In a real application, you would create a uxrCustomTransport
-    // and register the callbacks (esp_usbcdc_open, esp_usbcdc_close,
-    // esp_usbcdc_write, esp_usbcdc_read) with micro-ROS.
+    // and register the callbacks (mw_uros_transport_usb_open, mw_uros_transport_usb_close,
+    // mw_uros_transport_usb_write, mw_uros_transport_usb_read) with micro-ROS.
     //
     // Example:
     // struct uxrCustomTransport transport;
     // transport.args = &cdc_port;
     // uxr_set_custom_transport_callbacks(
     //     &transport,
-    //     esp_usbcdc_open,
-    //     esp_usbcdc_close,
-    //     esp_usbcdc_write,
-    //     esp_usbcdc_read
+    //     mw_uros_transport_usb_open,
+    //     mw_uros_transport_usb_close,
+    //     mw_uros_transport_usb_write,
+    //     mw_uros_transport_usb_read
     // );
 
     ESP_LOGI(TAG, "USB-CDC transport ready for micro-ROS integration");

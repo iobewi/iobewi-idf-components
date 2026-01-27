@@ -1,6 +1,6 @@
-#include "mw_uros_transport_usb/esp_usbcdc_common.h"
+#include "mw_uros_transport_usb/mw_uros_transport_usb.h"
 
-esp_err_t esp_usbcdc_tinyusb_init_once(const tinyusb_config_t *tinyusb_config)
+esp_err_t mw_uros_transport_usb_init(const tinyusb_config_t *tinyusb_config)
 {
     static bool tinyusb_initialized = false;
 

@@ -1,8 +1,7 @@
-#include "mw_uros_transport_usb/esp_usbcdc_logging.h"
-#include "mw_uros_transport_usb/esp_usbcdc_common.h"
+#include "mw_uros_transport_usb/mw_uros_transport_usb.h"
 
 // Initialize USB-CDC logging
-esp_err_t esp_usbcdc_logging_init(void)
+esp_err_t mw_uros_transport_usb_logging_init(void)
 {
     const tinyusb_config_t tinyusb_config = {
         .descriptor = NULL,
@@ -11,7 +10,7 @@ esp_err_t esp_usbcdc_logging_init(void)
         .configuration_descriptor = NULL,
     };
 
-    esp_err_t ret = esp_usbcdc_tinyusb_init_once(&tinyusb_config);
+    esp_err_t ret = mw_uros_transport_usb_init(&tinyusb_config);
 
     if (ret == ESP_ERR_INVALID_ARG || ret == ESP_FAIL) {
         return ret;
@@ -39,7 +38,7 @@ esp_err_t esp_usbcdc_logging_init(void)
 }
 
 // Deinitialize USB-CDC logging
-esp_err_t esp_usbcdc_logging_deinit(void)
+esp_err_t mw_uros_transport_usb_logging_deinit(void)
 {
     esp_err_t ret = esp_tusb_deinit_console(TINYUSB_CDC_ACM_1);
 

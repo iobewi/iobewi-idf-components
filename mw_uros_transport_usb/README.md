@@ -46,24 +46,25 @@ Ce composant fournit l'implémentation du transport USB-CDC pour micro-ROS sur E
 ### Transport micro-ROS
 
 ```c
-bool esp_usbcdc_open(struct uxrCustomTransport* transport);
-bool esp_usbcdc_close(struct uxrCustomTransport* transport);
-size_t esp_usbcdc_write(struct uxrCustomTransport* transport,
-                        const uint8_t* buf, size_t len, uint8_t* err);
-size_t esp_usbcdc_read(struct uxrCustomTransport* transport,
-                       uint8_t* buf, size_t len, int timeout, uint8_t* err);
+bool mw_uros_transport_usb_open(struct uxrCustomTransport* transport);
+bool mw_uros_transport_usb_close(struct uxrCustomTransport* transport);
+size_t mw_uros_transport_usb_write(struct uxrCustomTransport* transport,
+                                   const uint8_t* buf, size_t len, uint8_t* err);
+size_t mw_uros_transport_usb_read(struct uxrCustomTransport* transport,
+                                  uint8_t* buf, size_t len, int timeout, uint8_t* err);
 ```
 
 ### Logging USB-CDC
 
 ```c
-esp_err_t esp_usbcdc_logging_init(void);
+esp_err_t mw_uros_transport_usb_logging_init(void);
+esp_err_t mw_uros_transport_usb_logging_deinit(void);
 ```
 
 ### Initialisation TinyUSB
 
 ```c
-esp_err_t esp_usbcdc_tinyusb_init_once(const tinyusb_config_t *tinyusb_config);
+esp_err_t mw_uros_transport_usb_init(const tinyusb_config_t *tinyusb_config);
 ```
 
 ## Utilisation
@@ -73,7 +74,7 @@ esp_err_t esp_usbcdc_tinyusb_init_once(const tinyusb_config_t *tinyusb_config);
 Le transport USB-CDC est utilisé automatiquement si configuré dans micro-ROS :
 
 ```c
-#include "mw_uros_transport_usb/esp_usbcdc_transport.h"
+#include "mw_uros_transport_usb/mw_uros_transport_usb.h"
 #include <rmw_microros/rmw_microros.h>
 
 void app_main(void) {
