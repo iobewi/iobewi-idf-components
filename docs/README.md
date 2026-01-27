@@ -38,16 +38,10 @@ Guides d’implémentation et aide à l’application du standard (non opposable
 - Vues système, choix d’architecture, conventions transverses.
 - Intégration micro-ROS à l’échelle du framework (hors détails normatifs).
 
-### `guides/`
-- Guides techniques et conventions d’équipe (format, workflow, outillage).
-- Ne doit pas contenir de règles “obligatoires” non recopiées dans `standard.md`.
-
 ### `audits/`
 - Audits de conformité, campagnes qualité, plans de remise aux normes.
 - Les audits doivent référencer explicitement les IDs du standard (ex: `STD-STR-003`).
 
-### `reports/`
-- Rapports de sprint, livrables projet, décisions datées (ADR-like si besoin).
 
 ### `summary/`
 - Synthèses et état global (conformité, composants référents, dette/écarts ouverts).
@@ -58,6 +52,6 @@ Guides d’implémentation et aide à l’application du standard (non opposable
 
 - **Normatif** → `docs/standard.md` uniquement.
 - **Explicatif / how-to** → `docs/annexes/`.
-- **Historique / suivi** → `audits/`, `reports/`, `summary/`.
+- **Historique / suivi** → `audits/`, `summary/`.
 
 Chaque sous-dossier contient un `README.md` décrivant son périmètre et ses conventions.
