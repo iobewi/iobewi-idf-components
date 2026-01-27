@@ -22,3 +22,8 @@ détecter toute régression fonctionnelle, temporelle ou mémoire.
 
 Ces tests sont destinés à être exécutés en CI
 ou sur banc matériel.
+
+## Campagne de test
+
+La campagne complète et le modèle de reporting sont décrits dans
+`test/CAMPAGNE_TEST.md` et `test/reporting/REPORT_TEMPLATE.md`.
