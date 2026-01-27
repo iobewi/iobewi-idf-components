@@ -42,6 +42,8 @@ Guides d’implémentation et aide à l’application du standard (non opposable
 - Audits de conformité, campagnes qualité, plans de remise aux normes.
 - Les audits doivent référencer explicitement les IDs du standard (ex: `STD-STR-003`).
 
+### `reports/`
+- Rapports de sprint, livrables projet, décisions datées (ADR-like si besoin).
 
 ### `summary/`
 - Synthèses et état global (conformité, composants référents, dette/écarts ouverts).
@@ -52,6 +54,6 @@ Guides d’implémentation et aide à l’application du standard (non opposable
 
 - **Normatif** → `docs/standard.md` uniquement.
 - **Explicatif / how-to** → `docs/annexes/`.
-- **Historique / suivi** → `audits/`, `summary/`.
+- **Historique / suivi** → `audits/`, `reports/`, `summary/`.
 
 Chaque sous-dossier contient un `README.md` décrivant son périmètre et ses conventions.
