@@ -18,6 +18,10 @@ justification des changements). Elle est conçue pour une exécution **CI** et
 - **Performance** : mesures de latence/heap/CPU.
 - **Matériel** : bancs et cartes utilisées.
 
+Les dossiers associés sont disponibles dans `test/non_regression/`,
+`test/integration/` et `test/performance/`, avec des README dédiés pour
+documenter les attentes locales et la structure des tests.
+
 ## Extension à l’ensemble des composants
 
 La campagne s’applique **à chaque composant** du dépôt. Pour assurer une
@@ -105,6 +109,10 @@ idf.py -p <port> flash monitor
   et tracée** (issue, ticket, ou note de version).
 
 ## Reporting minimal attendu (template)
+
+Un modèle de rapport est disponible dans
+`test/reporting/REPORT_TEMPLATE.md`. Il doit être rempli pour chaque exécution
+manuelle ou campagne CI.
 
 - **Test** : nom du test
 - **Cible** : type de carte/SoC
