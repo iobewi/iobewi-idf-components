@@ -8,6 +8,11 @@ extern "C" {
 #endif
 
 /**
+ * @brief Handle opaque du driver LED RGB.
+ */
+typedef struct drv_led_rgb_s drv_led_rgb_t;
+
+/**
  * @brief RGB color structure
  */
 typedef struct {

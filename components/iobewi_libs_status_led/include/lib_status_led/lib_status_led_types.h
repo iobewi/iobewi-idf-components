@@ -5,6 +5,11 @@ extern "C" {
 #endif
 
 /**
+ * @brief Handle opaque de la bibliothèque status LED.
+ */
+typedef struct lib_status_led_s lib_status_led_t;
+
+/**
  * @brief États applicatifs supportés par le middleware status LED
  */
 typedef enum {

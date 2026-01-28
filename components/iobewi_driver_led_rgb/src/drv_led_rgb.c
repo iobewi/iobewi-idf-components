@@ -9,7 +9,7 @@ static const char *TAG = "drv_led_rgb";
 /**
  * @brief Internal driver context
  */
-struct drv_led_rgb {
+struct drv_led_rgb_s {
     led_strip_handle_t strip;
     drv_led_rgb_config_t config;
     uint8_t brightness;  // Current brightness (0-255, 0=off, 255=max)
