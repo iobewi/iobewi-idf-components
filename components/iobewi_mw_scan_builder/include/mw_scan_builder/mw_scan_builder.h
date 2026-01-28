@@ -9,6 +9,26 @@ extern "C" {
 #endif
 
 /**
+ * @brief Create and initialize a scan builder handle.
+ *
+ * @param config Scan configuration (bin count, angular layout, range limits,
+ *               scan timing, frame identifier).
+ * @param out    Output pointer receiving the allocated handle.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters, ESP_ERR_NO_MEM on allocation failure.
+ */
+esp_err_t mw_scan_builder_new(const mw_scan_builder_config_t *config, mw_scan_builder_t **out);
+
+/**
+ * @brief Destroy a scan builder handle created with mw_scan_builder_new().
+ *
+ * @param handle Scan builder handle.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters.
+ */
+esp_err_t mw_scan_builder_del(mw_scan_builder_t *handle);
+
+/**
  * @brief Initialize a LaserScan message according to the provided scan configuration.
  *
  * This function initializes the LaserScan structure, sets all static fields

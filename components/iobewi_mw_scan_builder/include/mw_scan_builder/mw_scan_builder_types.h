@@ -30,6 +30,11 @@ typedef struct {
 } mw_scan_builder_config_t;
 
 /**
+ * @brief Handle opaque du scan builder.
+ */
+typedef struct mw_scan_builder_s mw_scan_builder_t;
+
+/**
  * @brief Storage buffers and ownership tracking for LaserScan message.
  */
 typedef struct {
