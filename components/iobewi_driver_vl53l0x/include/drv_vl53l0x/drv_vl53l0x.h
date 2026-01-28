@@ -46,6 +46,25 @@ typedef drv_vl53l0x_slot_t vl53l0x_slot_t;
  * ========================= */
 
 /**
+ * @brief Crée une nouvelle instance du driver VL53L0X.
+ *
+ * @param[in] config Configuration I2C (ne peut être NULL)
+ * @param[out] out Handle créé (ne peut être NULL)
+ * @return ESP_OK si succès
+ *         ESP_ERR_INVALID_ARG si config ou out NULL
+ *         ESP_ERR_NO_MEM si échec allocation
+ */
+esp_err_t drv_vl53l0x_new(const drv_vl53l0x_config_t *config, drv_vl53l0x_t **out);
+
+/**
+ * @brief Détruit une instance du driver VL53L0X.
+ *
+ * @param[in] handle Handle à détruire (ne peut être NULL)
+ * @return ESP_OK si succès, ESP_ERR_INVALID_ARG si handle NULL
+ */
+esp_err_t drv_vl53l0x_del(drv_vl53l0x_t *handle);
+
+/**
  * @brief Initializes the I2C master bus (new ESP-IDF driver).
  *
  * Call once before any sensor usage.

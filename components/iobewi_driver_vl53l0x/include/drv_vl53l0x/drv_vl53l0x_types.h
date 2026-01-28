@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "driver/gpio.h"
+#include "driver/i2c.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -28,6 +29,19 @@ extern "C" {
  * @brief Adresse I2C par défaut du VL53L0X (7-bit)
  */
 #define DRV_VL53L0X_I2C_ADDRESS_DEFAULT_7B  (0x29)
+
+/**
+ * @brief Handle opaque du driver VL53L0X.
+ */
+typedef struct drv_vl53l0x_s drv_vl53l0x_t;
+
+/**
+ * @brief Configuration pour créer une instance du driver VL53L0X.
+ */
+typedef struct {
+    i2c_port_t i2c_port; ///< Port I2C (ESP-IDF)
+    uint8_t i2c_addr;    ///< Adresse I2C 7-bit
+} drv_vl53l0x_config_t;
 
 /**
  * @brief Device VL53L0X avec état ST API

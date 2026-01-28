@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -26,12 +27,45 @@
 static const char *TAG = "vl53l0x";
 static bool isr_service_installed = false;
 
+struct drv_vl53l0x_s {
+    i2c_port_t i2c_port;
+    uint8_t i2c_addr;
+};
+
 /* These symbols are implemented in st_api/platform/src/vl53l0x_i2c_platform.c */
 extern esp_err_t vl53l0x_i2c_master_init(gpio_num_t sda,
                                         gpio_num_t scl,
                                         uint32_t clk_hz);
 
 extern esp_err_t vl53l0x_i2c_probe(uint8_t addr_7b);
+
+esp_err_t drv_vl53l0x_new(const drv_vl53l0x_config_t *config, drv_vl53l0x_t **out)
+{
+    if (config == NULL || out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    drv_vl53l0x_t *handle = calloc(1, sizeof(*handle));
+    if (handle == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    handle->i2c_port = config->i2c_port;
+    handle->i2c_addr = config->i2c_addr;
+
+    *out = handle;
+    return ESP_OK;
+}
+
+esp_err_t drv_vl53l0x_del(drv_vl53l0x_t *handle)
+{
+    if (handle == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    free(handle);
+    return ESP_OK;
+}
 
 /* ---- Implementations adapted from the legacy vl53l0x_i2c_platform.c ---- */
 static esp_err_t st_init_sequence(VL53L0X_Dev_t *pDevice, uint32_t timing_budget_us)

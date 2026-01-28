@@ -2,7 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "vl53l0x.h"
+#include "drv_vl53l0x/drv_vl53l0x.h"
 
 static const char *TAG = "basic_app";
 
@@ -17,8 +17,19 @@ void app_main(void)
         return;
     }
 
+    drv_vl53l0x_config_t config = {
+        .i2c_port = I2C_NUM_0,
+        .i2c_addr = 0x29,
+    };
+    drv_vl53l0x_t *driver = NULL;
+    err = drv_vl53l0x_new(&config, &driver);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "drv_vl53l0x_new failed: %s", esp_err_to_name(err));
+        return;
+    }
+
     vl53l0x_dev_t dev = {
-        .addr_7b = 0x29,
+        .addr_7b = config.i2c_addr,
     };
 
     ESP_LOGI(TAG, "Init VL53L0X @0x29...");
@@ -26,6 +37,7 @@ void app_main(void)
     err = vl53l0x_init(&dev, 33000);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "vl53l0x_init failed: %s", esp_err_to_name(err));
+        drv_vl53l0x_del(driver);
         // Prevent a rapid reset loop on initialization failure.
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
