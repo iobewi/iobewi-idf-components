@@ -1,0 +1,5 @@
+version: "0.1.0"
+description: "Driver ADC brut pour canaux NTC (sans conversion)"
+dependencies:
+  idf:
+    version: ">=5.1"

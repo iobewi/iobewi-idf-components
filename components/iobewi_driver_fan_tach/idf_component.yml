@@ -1,0 +1,4 @@
+version: "1.0.0"
+description: "Driver tachymètre ventilateur (PCNT) - pulses bruts / période"
+dependencies:
+  idf: ">=5.1"
