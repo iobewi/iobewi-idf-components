@@ -13,8 +13,10 @@
 extern "C" {
 #endif
 
-// Forward declaration
-typedef struct uros_core_context uros_core_context_t;
+/**
+ * @brief Handle opaque du composant mw_uros_core.
+ */
+typedef struct mw_uros_core_s mw_uros_core_t;
 
 /**
  * @brief Application interface for pluggable micro-ROS applications

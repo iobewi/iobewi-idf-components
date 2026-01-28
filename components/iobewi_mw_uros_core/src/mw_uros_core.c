@@ -32,7 +32,7 @@ static const char *TAG = "UROS_CORE";
 #define AGENT_MAX_MISSED_PINGS 3
 
 // Forward declaration of helper (defined after struct)
-static inline void uros_set_led_state(uros_core_context_t *ctx, lib_status_led_state_t state);
+static inline void uros_set_led_state(mw_uros_core_t *ctx, lib_status_led_state_t state);
 
 // RCL check macros (need ctx in scope)
 #define RCCHECK_GOTO(fn, label) {                                                                     \
@@ -65,12 +65,12 @@ static inline void uros_set_led_state(uros_core_context_t *ctx, lib_status_led_s
 __attribute__((weak)) rmw_ret_t rmw_uros_set_entity_destroy_session_timeout(int64_t timeout_ms);
 
 // Global context for timer callback (single instance supported)
-static uros_core_context_t *g_current_ctx = NULL;
+static mw_uros_core_t *g_current_ctx = NULL;
 
 /**
  * @brief Internal context structure for micro-ROS core
  */
-struct uros_core_context {
+struct mw_uros_core_s {
     // Configuration
     uros_core_config_t config;
     uros_app_interface_t app;
@@ -109,7 +109,7 @@ struct uros_core_context {
 // ============================================================================
 
 // Helper to set LED state (no-op if LED disabled)
-static inline void uros_set_led_state(uros_core_context_t *ctx, lib_status_led_state_t state) {
+static inline void uros_set_led_state(mw_uros_core_t *ctx, lib_status_led_state_t state) {
     if (ctx && ctx->status_led) {
         lib_status_led_set_state(ctx->status_led, state);
     }
@@ -119,7 +119,7 @@ static inline void uros_set_led_state(uros_core_context_t *ctx, lib_status_led_s
 // Public utility functions
 // ============================================================================
 
-esp_err_t uros_core_sync_time(void)
+esp_err_t mw_uros_core_sync_time(void)
 {
     rmw_ret_t sync_ret = RMW_RET_ERROR;
     for (int attempt = 1; attempt <= TIME_SYNC_MAX_ATTEMPTS; attempt++) {
@@ -136,7 +136,7 @@ esp_err_t uros_core_sync_time(void)
     return ESP_FAIL;
 }
 
-esp_err_t uros_core_log_rcl_failure(const char *tag, const char *label, rcl_ret_t rc)
+esp_err_t mw_uros_core_log_rcl_failure(const char *tag, const char *label, rcl_ret_t rc)
 {
     rcl_error_string_t err = rcl_get_error_string();
     if (err.str[0] != '\0') {
@@ -148,7 +148,7 @@ esp_err_t uros_core_log_rcl_failure(const char *tag, const char *label, rcl_ret_
     return ESP_OK;
 }
 
-esp_err_t uros_core_configure_entity_timeout(void)
+esp_err_t mw_uros_core_configure_entity_timeout(void)
 {
     if (rmw_uros_set_entity_destroy_session_timeout != NULL) {
         rmw_ret_t ret = rmw_uros_set_entity_destroy_session_timeout(ENTITY_DESTROY_TIMEOUT_MS);
@@ -185,7 +185,7 @@ static void uros_core_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
  */
 static void uros_core_pub_task(void *arg)
 {
-    uros_core_context_t *ctx = (uros_core_context_t *)arg;
+    mw_uros_core_t *ctx = (mw_uros_core_t *)arg;
 
     ESP_LOGI(TAG, "Publisher task started");
 
@@ -246,7 +246,7 @@ static void uros_core_pub_task(void *arg)
 /**
  * @brief Cleanup RCL session
  */
-static void uros_core_cleanup_session(uros_core_context_t *ctx,
+static void uros_core_cleanup_session(mw_uros_core_t *ctx,
                                       rcl_publisher_t *publisher,
                                       rcl_node_t *node,
                                       rclc_executor_t *executor,
@@ -263,7 +263,7 @@ static void uros_core_cleanup_session(uros_core_context_t *ctx,
 {
     rcl_ret_t rc = RCL_RET_OK;
 
-    uros_core_configure_entity_timeout();
+    mw_uros_core_configure_entity_timeout();
 
     // Clear publisher pointer to prevent pub_task from using stale reference
     ctx->publisher = NULL;
@@ -294,43 +294,43 @@ static void uros_core_cleanup_session(uros_core_context_t *ctx,
     if (executor_ready) {
         rc = rclc_executor_fini(executor);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rclc_executor_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rclc_executor_fini()", rc);
         }
     }
     if (timer_ready) {
         rc = rcl_timer_fini(timer);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rcl_timer_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rcl_timer_fini()", rc);
         }
     }
     if (publisher_ready) {
         rc = rcl_publisher_fini(publisher, node);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rcl_publisher_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rcl_publisher_fini()", rc);
         }
     }
     if (node_ready) {
         rc = rcl_node_fini(node);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rcl_node_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rcl_node_fini()", rc);
         }
     }
     if (context_ready && rcl_context_is_valid(&support->context)) {
         rc = rcl_shutdown(&support->context);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rcl_shutdown()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rcl_shutdown()", rc);
         }
     }
     if (context_ready) {
         rc = rclc_support_fini(support);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rclc_support_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rclc_support_fini()", rc);
         }
     }
     if (init_options_ready) {
         rc = rcl_init_options_fini(init_options);
         if (rc != RCL_RET_OK) {
-            uros_core_log_rcl_failure(TAG, "rcl_init_options_fini()", rc);
+            mw_uros_core_log_rcl_failure(TAG, "rcl_init_options_fini()", rc);
         }
     }
 
@@ -345,7 +345,7 @@ static void uros_core_cleanup_session(uros_core_context_t *ctx,
  */
 static void uros_core_main_task(void *arg)
 {
-    uros_core_context_t *ctx = (uros_core_context_t *)arg;
+    mw_uros_core_t *ctx = (mw_uros_core_t *)arg;
     uint32_t consecutive_failures = 0;
 
     ESP_LOGI(TAG, "Main task started");
@@ -386,7 +386,7 @@ static void uros_core_main_task(void *arg)
         ESP_LOGI(TAG, "Initializing micro-ROS support...");
         RCCHECK_FAIL_GOTO(rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator), cleanup, init_failed);
         context_ready = true;
-        uros_core_sync_time();
+        mw_uros_core_sync_time();
 
         // Create node
         rcl_node_options_t node_ops = rcl_node_get_default_options();
@@ -586,12 +586,38 @@ cleanup:
 // Core lifecycle functions
 // ============================================================================
 
-esp_err_t uros_core_create(const uros_core_config_t *config,
-                           const uros_app_interface_t *app,
-                           uros_core_context_t **out)
+esp_err_t mw_uros_core_new(const uros_core_config_t *config, mw_uros_core_t **out)
+{
+    if (config == NULL || out == NULL) {
+        ESP_LOGE(TAG, "Invalid arguments to mw_uros_core_new()");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Allocate context
+    mw_uros_core_t *ctx = (mw_uros_core_t *)calloc(1, sizeof(mw_uros_core_t));
+    if (ctx == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate core context");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Copy configuration
+    memcpy(&ctx->config, config, sizeof(uros_core_config_t));
+
+    *out = ctx;
+    return ESP_OK;
+}
+
+esp_err_t mw_uros_core_del(mw_uros_core_t *handle)
+{
+    return mw_uros_core_destroy(handle);
+}
+
+esp_err_t mw_uros_core_create(const uros_core_config_t *config,
+                              const uros_app_interface_t *app,
+                              mw_uros_core_t **out)
 {
     if (config == NULL || app == NULL || out == NULL) {
-        ESP_LOGE(TAG, "Invalid arguments to uros_core_create()");
+        ESP_LOGE(TAG, "Invalid arguments to mw_uros_core_create()");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -601,33 +627,28 @@ esp_err_t uros_core_create(const uros_core_config_t *config,
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Allocate context
-    uros_core_context_t *ctx = (uros_core_context_t *)malloc(sizeof(uros_core_context_t));
-    if (ctx == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate core context");
-        return ESP_ERR_NO_MEM;
+    mw_uros_core_t *ctx = NULL;
+    esp_err_t new_ret = mw_uros_core_new(config, &ctx);
+    if (new_ret != ESP_OK) {
+        return new_ret;
     }
-    memset(ctx, 0, sizeof(uros_core_context_t));
 
-    // Copy configuration
-    memcpy(&ctx->config, config, sizeof(uros_core_config_t));
     memcpy(&ctx->app, app, sizeof(uros_app_interface_t));
 
     // Allocate ROS message
-    ctx->ros_message = malloc(app->message_size);
+    ctx->ros_message = calloc(1, app->message_size);
     if (ctx->ros_message == NULL) {
         ESP_LOGE(TAG, "Failed to allocate ROS message (%zu bytes)", app->message_size);
-        free(ctx);
+        mw_uros_core_destroy(ctx);
         return ESP_ERR_NO_MEM;
     }
-    memset(ctx->ros_message, 0, app->message_size);
 
     ESP_LOGI(TAG, "Core context created (msg_size=%zu)", app->message_size);
     *out = ctx;
     return ESP_OK;
 }
 
-esp_err_t uros_core_destroy(uros_core_context_t *ctx)
+esp_err_t mw_uros_core_destroy(mw_uros_core_t *ctx)
 {
     if (ctx == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -642,6 +663,7 @@ esp_err_t uros_core_destroy(uros_core_context_t *ctx)
     // Free ROS message
     if (ctx->ros_message != NULL) {
         free(ctx->ros_message);
+        ctx->ros_message = NULL;
     }
 
     // Free context
@@ -650,7 +672,7 @@ esp_err_t uros_core_destroy(uros_core_context_t *ctx)
     return ESP_OK;
 }
 
-esp_err_t uros_core_start(uros_core_context_t *ctx)
+esp_err_t mw_uros_core_start(mw_uros_core_t *ctx)
 {
     if (ctx == NULL) {
         ESP_LOGE(TAG, "Invalid context");

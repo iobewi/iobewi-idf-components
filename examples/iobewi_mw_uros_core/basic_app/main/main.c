@@ -111,16 +111,18 @@ void app_main(void)
     };
 
     // Create core context
-    uros_core_context_t *core = uros_core_create(&config, &app);
-    if (core == NULL) {
-        ESP_LOGE(TAG, "Failed to create core context");
+    mw_uros_core_t *core = NULL;
+    esp_err_t core_ret = mw_uros_core_create(&config, &app, &core);
+    if (core_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create core context: %s", esp_err_to_name(core_ret));
         return;
     }
 
     // Start micro-ROS core (spawns tasks)
-    if (!uros_core_start(core)) {
-        ESP_LOGE(TAG, "Failed to start core");
-        uros_core_destroy(core);
+    core_ret = mw_uros_core_start(core);
+    if (core_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start core: %s", esp_err_to_name(core_ret));
+        mw_uros_core_destroy(core);
         return;
     }
 
