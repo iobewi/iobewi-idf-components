@@ -17,11 +17,6 @@ typedef struct {
 } lib_status_led_config_t;
 
 /**
- * @brief Opaque handle pour middleware status LED
- */
-typedef struct lib_status_led lib_status_led_t;
-
-/**
  * @brief Créer une instance du middleware status LED
  *
  * @param[in] cfg Configuration

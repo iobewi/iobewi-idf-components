@@ -8,11 +8,6 @@ extern "C" {
 #endif
 
 /**
- * @brief Opaque handle for LED RGB driver
- */
-typedef struct drv_led_rgb drv_led_rgb_t;
-
-/**
  * @brief Create a new LED RGB driver instance
  *
  * @param[in] cfg Configuration structure

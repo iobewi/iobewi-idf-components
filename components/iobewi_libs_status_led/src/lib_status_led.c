@@ -9,7 +9,7 @@ static const char *TAG = "lib_status_led";
 /**
  * @brief Context interne du middleware
  */
-struct lib_status_led {
+struct lib_status_led_s {
     drv_led_rgb_t *driver;
     lib_status_led_config_t config;
     lib_status_led_state_t current_state;
