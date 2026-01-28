@@ -7,6 +7,12 @@
 
 #define SCAN_BINS_MAX CONFIG_MICRO_ROS_SCAN_BINS
 
+struct mw_scan_builder_s {
+    sensor_msgs__msg__LaserScan msg;
+    mw_scan_builder_storage_t storage;
+    mw_scan_builder_config_t config;
+};
+
 #if CONFIG_MICRO_ROS_SCAN_ALLOC_GUARD
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -40,6 +46,34 @@ static void heap_guard_end(heap_guard_t before, const char *label)
     }
 }
 #endif
+
+esp_err_t mw_scan_builder_new(const mw_scan_builder_config_t *config, mw_scan_builder_t **out)
+{
+    if (!config || !out) return ESP_ERR_INVALID_ARG;
+
+    *out = NULL;
+    mw_scan_builder_t *handle = calloc(1, sizeof(*handle));
+    if (!handle) return ESP_ERR_NO_MEM;
+
+    handle->config = *config;
+    esp_err_t err = mw_scan_builder_init(&handle->msg, &handle->config, &handle->storage);
+    if (err != ESP_OK) {
+        free(handle);
+        return err;
+    }
+
+    *out = handle;
+    return ESP_OK;
+}
+
+esp_err_t mw_scan_builder_del(mw_scan_builder_t *handle)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t err = mw_scan_builder_deinit(&handle->msg, &handle->storage);
+    free(handle);
+    return err;
+}
 
 esp_err_t mw_scan_builder_init(sensor_msgs__msg__LaserScan *msg,
                                const mw_scan_builder_config_t *cfg,
