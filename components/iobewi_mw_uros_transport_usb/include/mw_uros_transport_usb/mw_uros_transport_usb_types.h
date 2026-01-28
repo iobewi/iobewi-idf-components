@@ -11,6 +11,11 @@ extern "C" {
 // Ce fichier est créé pour respecter la convention CDC (section 5.1).
 // Les types seront ajoutés ici si nécessaire dans le futur.
 
+/**
+ * @brief Handle opaque du transport USB micro-ROS.
+ */
+typedef struct mw_uros_transport_usb_s mw_uros_transport_usb_t;
+
 #ifdef __cplusplus
 }
 #endif
