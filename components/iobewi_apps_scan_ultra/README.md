@@ -150,10 +150,13 @@ void app_main(void)
     };
 
     // 6. Créer et démarrer le core micro-ROS
-    uros_core_context_t *core = NULL;
-    esp_err_t ret = uros_core_create(&uros_config, &app_interface, &core);
+    mw_uros_core_t *core = NULL;
+    esp_err_t ret = mw_uros_core_create(&uros_config, &app_interface, &core);
     if (ret == ESP_OK) {
-        uros_core_start(core);
+        ret = mw_uros_core_start(core);
+        if (ret != ESP_OK) {
+            mw_uros_core_destroy(core);
+        }
     }
 }
 ```

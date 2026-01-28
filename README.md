@@ -283,10 +283,13 @@ void app_main(void) {
     };
 
     // Création et démarrage
-    uros_core_context_t *core = NULL;
-    esp_err_t ret = uros_core_create(&config, &app, &core);
+    mw_uros_core_t *core = NULL;
+    esp_err_t ret = mw_uros_core_create(&config, &app, &core);
     if (ret == ESP_OK) {
-        uros_core_start(core);
+        ret = mw_uros_core_start(core);
+        if (ret != ESP_OK) {
+            mw_uros_core_destroy(core);
+        }
     }
 }
 ```

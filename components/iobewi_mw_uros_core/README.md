@@ -95,19 +95,36 @@ typedef struct {
 #### Lifecycle
 
 ```c
-uros_core_context_t *uros_core_create(const uros_core_config_t *config,
-                                      const uros_app_interface_t *app);
-void uros_core_destroy(uros_core_context_t *ctx);
-bool uros_core_start(uros_core_context_t *ctx);
+esp_err_t mw_uros_core_new(const uros_core_config_t *config, mw_uros_core_t **out);
+esp_err_t mw_uros_core_del(mw_uros_core_t *handle);
+esp_err_t mw_uros_core_create(const uros_core_config_t *config,
+                              const uros_app_interface_t *app,
+                              mw_uros_core_t **out);
+esp_err_t mw_uros_core_destroy(mw_uros_core_t *ctx);
+esp_err_t mw_uros_core_start(mw_uros_core_t *ctx);
 ```
 
 #### Utilitaires
 
 ```c
-void uros_core_sync_time(void);
-void uros_core_log_rcl_failure(const char *tag, const char *label, rcl_ret_t rc);
-void uros_core_configure_entity_timeout(void);
+esp_err_t mw_uros_core_sync_time(void);
+esp_err_t mw_uros_core_log_rcl_failure(const char *tag, const char *label, rcl_ret_t rc);
+esp_err_t mw_uros_core_configure_entity_timeout(void);
 ```
+
+## ⚠️ BREAKING CHANGES (v2.0)
+
+Les fonctions suivantes ont été renommées pour conformité au standard :
+
+| Ancienne API (v1.x) | Nouvelle API (v2.x) |
+|---------------------|---------------------|
+| `uros_core_configure_entity_timeout()` | `mw_uros_core_configure_entity_timeout()` |
+| `uros_core_create()` | `mw_uros_core_create()` |
+| `uros_core_destroy()` | `mw_uros_core_destroy()` |
+| `uros_core_log_rcl_failure()` | `mw_uros_core_log_rcl_failure()` |
+| `uros_core_start()` | `mw_uros_core_start()` |
+| `uros_core_sync_time()` | `mw_uros_core_sync_time()` |
+| `uros_core_context_t` | `mw_uros_core_t` |
 
 ## Exemple d'utilisation
 
@@ -184,9 +201,9 @@ void app_main(void) {
     };
 
     // Création et démarrage
-    uros_core_context_t *core = uros_core_create(&config, &app);
-    if (core != NULL) {
-        uros_core_start(core);
+    mw_uros_core_t *core = NULL;
+    if (mw_uros_core_create(&config, &app, &core) == ESP_OK) {
+        mw_uros_core_start(core);
     }
 }
 ```
@@ -241,7 +258,11 @@ bool uros_app_imu_start(void) {
         .app_fini = imu_app_fini,
         // ...
     };
-    return uros_core_start(uros_core_create(&config, &app));
+    mw_uros_core_t *core = NULL;
+    if (mw_uros_core_create(&config, &app, &core) != ESP_OK) {
+        return false;
+    }
+    return mw_uros_core_start(core) == ESP_OK;
 }
 ```
 

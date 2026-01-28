@@ -176,8 +176,8 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Creating micro-ROS core...");
 
-    uros_core_context_t *core = NULL;
-    ret = uros_core_create(&uros_config, &app_interface, &core);
+    mw_uros_core_t *core = NULL;
+    ret = mw_uros_core_create(&uros_config, &app_interface, &core);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create uros_core: %s", esp_err_to_name(ret));
         app_scan_ultra_del(app);
@@ -195,7 +195,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Waiting for agent on /dev/ttyUSB0...");
     ESP_LOGI(TAG, "Run: ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0");
 
-    ret = uros_core_start(core);
+    ret = mw_uros_core_start(core);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start uros_core: %s", esp_err_to_name(ret));
         app_scan_ultra_del(app);
