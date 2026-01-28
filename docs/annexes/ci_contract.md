@@ -179,20 +179,27 @@ component iobewi_driver_xxx includes rcl/rcl.h
 
 ### CI-BLD — Compilation
 
-**Objectif**
-Garantir que le code est **compilable tel quel**.
+**Objectif**  
+Décrire les **contrôles généralement appliqués en CI** pour vérifier la compilabilité du projet.
 
-**Contrôles typiques**
+Ces contrôles **illustrent l’application du standard**, mais ne définissent **aucune règle normative supplémentaire**.
 
-- build ESP-IDF supporté (6.x)
-- aucun warning bloquant
-- dépendances CMake explicites
-- pas de hack de build
+**Contrôles typiques (exemples)**
 
-**Règles couvertes**
+- build ESP-IDF supporté (ex. 6.x)
+- build sans erreurs de compilation  
+  *(certains environnements CI peuvent également choisir de traiter des warnings comme des erreurs)*
+- dépendances CMake explicitement déclarées
+- absence de hacks de build (includes implicites, chemins absolus, etc.)
+
+**Lien avec le standard**
+
+Les contrôles ci-dessus sont dérivés des règles suivantes du standard :
 
 - `STD-BLD-001`
 - `STD-BLD-002`
+
+En cas de divergence entre un outil CI et le standard, **le standard prévaut toujours**.
 
 **Exemple d’échec**
 

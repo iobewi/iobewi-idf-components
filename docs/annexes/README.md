@@ -1,6 +1,3 @@
-# 📁 `docs/annexes/README.md`
-
-```markdown
 # 📎 Annexes – Guides & Détails Techniques
 
 Ce dossier contient les **annexes techniques** du framework **iobewi-idf-components**.
@@ -45,7 +42,7 @@ En cas de conflit :
 
 Exemple de structure :
 
-````
+```
 
 docs/annexes/
 ├── testing.md          # Détails des tests unitaires et patterns de mock

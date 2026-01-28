@@ -112,7 +112,8 @@ Pour produire du code **conforme au standard** (`docs/standard.md`), il est atte
 - la structure canonique des composants
 - les tests unitaires obligatoires
 
-Le script tools/scripts/check_conformity.sh est l’autorité finale.
+Le script `tools/scripts/check_conformity.sh` est un **outil de validation** (CI/local) qui applique des contrôles dérivés du standard.
+En cas de divergence, la référence normative reste `docs/standard.md`.
 
 Interdictions :
 - inventer une structure

@@ -69,8 +69,8 @@ examples/<component_id>/basic_app/
 Rappels pratiques :
 
 * `<component_id>` = **identique** au dossier du composant
-* un seul exemple `basic_app` par composant
-* pas de sous-variantes (`advanced_app`, `stress_app`, etc.)
+* le standard exige au minimum `basic_app/`.  
+* des variantes (`advanced_app/`, `stress_app/`, etc.) peuvent exister si elles apportent une valeur claire, mais il est recommandé de conserver `basic_app/` comme exemple de référence simple et stable.
 
 ---
 
@@ -402,7 +402,8 @@ Avant de valider un `basic_app` :
 * `docs/annexes/api_patterns.md`
 * `docs/annexes/testing.md`
 * `docs/annexes/microros.md`
-* `docs/annexes/component_playbook.md` (ou `audit_playbook.md` si fusionné)
+* `docs/annexes/audit_playbook.md`
+* `docs/annexes/audit_remediation.md`
 
 ---
 
