@@ -2,7 +2,7 @@
 
 ## Standard Normatif — iobewi-idf-components
 
-**Version : 0.1 (NORMATIF)**
+**Version : 0.2 (NORMATIF)**
 
 > ⚠️ **Ce document est la seule source de vérité normative du framework.**
 > Toute règle non présente ici est **non opposable**.
@@ -508,7 +508,116 @@ Un composant est **rejeté** si :
 
 ---
 
-## 10. 📎 Annexes (NON NORMATIVES)
+## 10. Git flow du dépôt
+
+**NORMATIF**
+
+### STD-GIT-001 — Branches longues (protégées)
+
+Les branches longues **DOIVENT** être limitées à :
+
+* `main` :
+  * **DOIT** rester buildable en permanence
+  * **DOIT** recevoir les tags de release (`vX.Y.Z`)
+  * **DOIT** être protégée (merge direct interdit)
+* `develop` :
+  * **DOIT** être la branche d’intégration continue
+  * **DOIT** servir de base à tous les développements
+  * **DOIT** être protégée (merge direct interdit)
+
+### STD-GIT-002 — Branches courtes (nommage obligatoire)
+
+Toute branche courte **DOIT** respecter l’un des schémas suivants :
+
+* `feature/<ticket>-<desc>`
+* `fix/<ticket>-<desc>`
+* `hotfix/<ticket>-<desc>`
+* `release/<X.Y.Z>`
+
+Tout nommage non conforme est **INTERDIT**.
+
+Exemples conformes :
+
+```
+feature/IDF-123-ajout-capteur
+fix/IDF-456-corrige-heap
+hotfix/IDF-789-corrige-crash
+release/1.4.0
+```
+
+### STD-GIT-003 — Cycle de développement
+
+* Toute branche `feature/*` ou `fix/*` :
+  * **DOIT** être créée depuis `develop`
+  * **DOIT** être intégrée **uniquement** via Pull Request
+  * **DOIT** être supprimée après merge
+
+Commandes de référence (exemples) :
+
+```
+git checkout develop
+git pull
+git checkout -b feature/IDF-123-ajout-capteur
+```
+
+### STD-GIT-004 — Processus de release
+
+Le processus de release **DOIT** suivre ce cycle :
+
+1. création d’une branche `release/<X.Y.Z>` depuis `develop`
+2. gel fonctionnel (corrections uniquement)
+3. merge vers `main`
+4. tag SemVer `vX.Y.Z`
+5. report obligatoire vers `develop`
+
+Commandes de référence (exemples) :
+
+```
+git checkout develop
+git pull
+git checkout -b release/1.4.0
+
+git checkout main
+git pull
+git merge --no-ff release/1.4.0
+git tag v1.4.0
+
+git checkout develop
+git merge --no-ff release/1.4.0
+```
+
+### STD-GIT-005 — Hotfix
+
+Un hotfix **DOIT** être :
+
+* créé depuis `main`
+* mergé vers `main`
+* tagué en patch SemVer (`vX.Y.(Z+1)`)
+* reporté **obligatoirement** sur `develop`
+
+Commandes de référence (exemples) :
+
+```
+git checkout main
+git pull
+git checkout -b hotfix/IDF-789-corrige-crash
+
+git checkout main
+git merge --no-ff hotfix/IDF-789-corrige-crash
+git tag v1.4.1
+
+git checkout develop
+git merge --no-ff hotfix/IDF-789-corrige-crash
+```
+
+### STD-GIT-006 — Règles Pull Requests
+
+* Toute intégration sur `main` ou `develop` **DOIT** passer par Pull Request.
+* La CI **DOIT** être verte avant merge.
+* Une revue minimale **OBLIGATOIRE** est requise (≥ 1 approbation).
+* Les branches `main` et `develop` **DOIVENT** rester protégées.
+
+## 11. 📎 Annexes (NON NORMATIVES)
 
 Les documents listés ci-dessous sont **strictement informatifs**.
 
@@ -585,7 +694,7 @@ En cas de divergence entre :
 
 ---
 
-## 11. Agents IA & automatisation
+## 12. Agents IA & automatisation
 
 **NORMATIF**
 
@@ -616,7 +725,7 @@ En cas de divergence entre :
 
 ---
 
-## 12. Versioning du standard
+## 13. Versioning du standard
 
 **NORMATIF**
 
