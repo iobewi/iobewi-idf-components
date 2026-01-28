@@ -81,7 +81,7 @@ Principes :
 
 * `test_*.c` : scénarios ciblés
 * `mocks/` : dépendances simulées
-* **aucun test** dans `src/`
+* éviter de placer des tests dans `src/`
 
 ---
 
@@ -251,7 +251,7 @@ Valider la logique métier et l’orchestration.
 ✅ **Machines à états**
 
 * transitions valides
-* états interdits inaccessibles
+* états non souhaités inaccessibles
 * invariants respectés
 
 ✅ **Configuration**

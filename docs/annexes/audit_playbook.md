@@ -48,7 +48,7 @@ Ce playbook est utilisé :
 * en revue de code formelle
 * par un agent IA d’analyse statique
 
-Il **ne doit pas** être utilisé pour :
+Il n’est pas destiné à être utilisé pour :
 
 * développer un composant
 * décider d’une architecture
@@ -93,8 +93,8 @@ Un audit suit **toujours** l’ordre ci-dessous :
 
 ⚠️
 
-* L’ordre **ne doit jamais être modifié**
-* Aucune étape **ne peut être sautée**
+* L’ordre ne devrait pas être modifié
+* Aucune étape n’est censée être sautée
 
 ---
 
@@ -132,7 +132,7 @@ Vérifier que le composant respecte **strictement** son rôle normatif.
 ### Vérifications
 
 * [ ] Dépendances compatibles avec la catégorie
-* [ ] Aucun include interdit (ex: `rcl` dans `drv_*`)
+* [ ] Aucun include listé comme interdit par le standard (ex: `rcl` dans `drv_*`)
 * [ ] Aucun accès matériel hors `drv_*`
 
 ### Outils autorisés
@@ -295,7 +295,7 @@ Il n’existe :
 
 ## 13. Artefact d’audit (recommandé)
 
-Chaque audit doit produire un artefact factuel :
+Chaque audit devrait produire un artefact factuel :
 
 ```md
 Audit — <component_id>

@@ -25,7 +25,7 @@
 
 Ce document sert à :
 
-- rendre explicite ce que la CI **doit faire respecter**
+- rendre explicite ce que la CI vise à faire respecter
 - éviter toute ambiguïté lors d’un échec CI
 - aligner humains et agents IA sur les mêmes attentes
 - garantir une interprétation **non subjective** des résultats CI
@@ -39,7 +39,7 @@ Ce document sert à :
 > **La CI n’invente jamais de règles.  
 > Elle applique mécaniquement le standard normatif.**
 
-Tout échec CI doit pouvoir être rattaché à :
+Tout échec CI devrait pouvoir être rattaché à :
 - une règle `STD-*`
 - une violation objectivement détectable
 
@@ -283,8 +283,8 @@ basic_app includes private header src/internal.h
 | Tests absents | ❌ blocage |
 | Exemple manquant | ❌ blocage |
 
-👉 **Aucune tolérance implicite**  
-👉 Toute exception doit être **documentée hors CI**
+👉 **Aucune tolérance implicite** (principe opérationnel)  
+👉 Toute exception est idéalement **documentée hors CI**
 
 ---
 

@@ -7,7 +7,7 @@
 >
 > Toute règle opposable est définie exclusivement dans `docs/standard.md`.
 
-# 🚫 Template — Exception au standard (trace obligatoire)
+# 🚫 Template — Exception au standard (trace recommandée)
 
 ```
 ID exception : EXC-<YYYYMMDD>-<shortname>

@@ -152,7 +152,7 @@ Ce document **n’est pas** :
 
 **Symptômes**
 
-* un utilisateur du composant doit ajouter “à la main” des dépendances
+* un utilisateur du composant est obligé d’ajouter “à la main” des dépendances
 * headers publics incluent des headers de dépendance non déclarée en `REQUIRES`
 
 **Cause typique**

@@ -27,7 +27,7 @@ La migration vise à :
 * séparer correctement les responsabilités
 * rendre le composant **auditable et CI-compatible**
 
-👉 Une migration ne doit **jamais** modifier le standard.
+👉 Une migration ne devrait **jamais** modifier le standard.
 
 ---
 
@@ -148,7 +148,7 @@ Exemple de correction :
 
 ---
 
-## 8. Étape 6 — Extraire ce qui ne doit pas être là
+## 8. Étape 6 — Extraire ce qui n’est pas censé être là
 
 Cas fréquent :
 
