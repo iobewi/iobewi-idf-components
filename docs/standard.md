@@ -566,7 +566,7 @@ Le processus de release **DOIT** suivre ce cycle :
 
 1. création d’une branche `release/<X.Y.Z>` depuis `develop`
 2. gel fonctionnel (corrections uniquement)
-3. merge vers `main`
+3. merge vers `main` via Pull Request
 4. tag SemVer `vX.Y.Z`
 5. report obligatoire vers `develop`
 
@@ -577,13 +577,12 @@ git checkout develop
 git pull
 git checkout -b release/1.4.0
 
-git checkout main
-git pull
-git merge --no-ff release/1.4.0
+gh pr create --base main --head release/1.4.0 --title "Release 1.4.0" --body "Release 1.4.0"
+gh pr merge --merge --delete-branch
 git tag v1.4.0
 
-git checkout develop
-git merge --no-ff release/1.4.0
+gh pr create --base develop --head release/1.4.0 --title "Report release 1.4.0" --body "Report release 1.4.0"
+gh pr merge --merge --delete-branch
 ```
 
 ### STD-GIT-005 — Hotfix
@@ -591,7 +590,7 @@ git merge --no-ff release/1.4.0
 Un hotfix **DOIT** être :
 
 * créé depuis `main`
-* mergé vers `main`
+* mergé vers `main` via Pull Request
 * tagué en patch SemVer (`vX.Y.(Z+1)`)
 * reporté **obligatoirement** sur `develop`
 
@@ -602,12 +601,12 @@ git checkout main
 git pull
 git checkout -b hotfix/IDF-789-corrige-crash
 
-git checkout main
-git merge --no-ff hotfix/IDF-789-corrige-crash
+gh pr create --base main --head hotfix/IDF-789-corrige-crash --title "Hotfix IDF-789" --body "Hotfix IDF-789"
+gh pr merge --merge --delete-branch
 git tag v1.4.1
 
-git checkout develop
-git merge --no-ff hotfix/IDF-789-corrige-crash
+gh pr create --base develop --head hotfix/IDF-789-corrige-crash --title "Report hotfix IDF-789" --body "Report hotfix IDF-789"
+gh pr merge --merge --delete-branch
 ```
 
 ### STD-GIT-006 — Règles Pull Requests
@@ -616,6 +615,8 @@ git merge --no-ff hotfix/IDF-789-corrige-crash
 * La CI **DOIT** être verte avant merge.
 * Une revue minimale **OBLIGATOIRE** est requise (≥ 1 approbation).
 * Les branches `main` et `develop` **DOIVENT** rester protégées.
+* Les merges vers `main` et `develop` **DOIVENT** être réalisés exclusivement via Pull Request.
+  Toute commande `git merge` vers ces branches est **illustrative** et **NE DOIT PAS** être exécutée directement.
 
 ## 11. 📎 Annexes (NON NORMATIVES)
 
