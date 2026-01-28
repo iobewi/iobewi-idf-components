@@ -45,7 +45,7 @@ Un `basic_app` :
 * ne modifie **jamais** le composant
 * est volontairement **simple, lisible, reproductible**
 
-👉 Si l’exemple devient complexe, il est trop gros : le contenu doit migrer vers
+👉 Si l’exemple devient complexe, il est trop gros : le contenu est idéalement migré vers
 un composant `lib_*` / `app_*` ou vers des tests unitaires.
 
 ---
@@ -240,8 +240,8 @@ idf_component_register(
 )
 ```
 
-👉 L’exemple **ne référence jamais** un chemin de composant particulier.
-👉 L’exemple **ne doit pas** ajouter des `REQUIRES` manuellement ici : ESP-IDF résout via
+👉 L’exemple évite de référencer un chemin de composant particulier.
+👉 Il est recommandé de ne pas ajouter de `REQUIRES` manuellement ici : ESP-IDF résout via
 `EXTRA_COMPONENT_DIRS` + `idf_component.yml` / `REQUIRES` des composants.
 
 ---
@@ -275,7 +275,7 @@ idf.py flash monitor
 - cleanup OK
 ```
 
-👉 Pas de duplication de la documentation du composant : l’exemple doit rester court.
+👉 Éviter la duplication de la documentation du composant : l’exemple gagne à rester court.
 
 ---
 
@@ -283,8 +283,8 @@ idf.py flash monitor
 
 Quand l’utiliser :
 
-* quand l’exemple doit configurer des GPIO/UART/I2C, sans figer des valeurs dans le code
-* quand l’exemple doit rester portable (devboards différentes)
+* quand l’exemple a besoin de configurer des GPIO/UART/I2C, sans figer des valeurs dans le code
+* quand l’exemple vise à rester portable (devboards différentes)
 
 Squelette recommandé :
 

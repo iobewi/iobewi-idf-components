@@ -29,9 +29,9 @@ Les annexes servent à :
 - Les annexes sont **informatives et explicatives**
 
 👉 Les annexes :
-- **NE DOIVENT PAS** introduire de nouvelles règles
-- **NE DOIVENT PAS** contredire le standard
-- **PEUVENT** détailler, illustrer ou exemplifier
+- **ne sont pas censées** introduire de nouvelles règles
+- **ne sont pas censées** contredire le standard
+- **peuvent** détailler, illustrer ou exemplifier
 
 En cas de conflit :
 > **Le standard prévaut toujours.**
@@ -92,7 +92,7 @@ Les annexes peuvent être utilisées par des agents IA pour :
 - générer du code conforme
 - proposer des refactorisations
 
-⚠️ Les agents ne doivent jamais considérer une annexe comme une source normative.
+⚠️ Les agents sont invités à ne jamais considérer une annexe comme une source normative.
 
 ---
 

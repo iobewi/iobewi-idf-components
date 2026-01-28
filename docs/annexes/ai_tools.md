@@ -28,7 +28,7 @@ Les assistants IA sont considérés comme :
 - des **agents soumis au standard**
 
 👉 **Ils ne définissent jamais les règles.**  
-👉 **Ils doivent s’y conformer.**
+👉 **Ils sont censés s’y conformer.**
 
 La **seule source de vérité normative** est :
 
@@ -174,7 +174,7 @@ Permettre à une IA de :
 
 ### Cadre strict
 
-Les tests produits par une IA doivent :
+Les tests produits par une IA sont attendus pour :
 
 * être unitaires (pas d’intégration)
 * utiliser des mocks déterministes

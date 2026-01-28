@@ -188,7 +188,7 @@ Comportement attendu :
 * valider systématiquement arguments en entrée
 * éviter les effets de bord avant validations/allocation OK
 * sur erreur : rollback / pas d’état partiellement modifié
-* `del()` doit pouvoir être appelé après init partielle (si new échoue après allocation)
+* il est recommandé que `del()` puisse être appelé après init partielle (si new échoue après allocation)
 
 ---
 

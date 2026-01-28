@@ -203,7 +203,7 @@ Par conception :
 * les agents IA n’invoquent pas d’exception implicite
 * les agents IA appliquent le standard par défaut
 
-Toute exception applicable doit être **explicitement visible dans le dépôt**.
+Toute exception applicable est idéalement **explicitement visible dans le dépôt**.
 
 Références normatives associées :
 

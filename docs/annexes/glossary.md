@@ -86,7 +86,7 @@ Classe fonctionnelle **normative** déduite **exclusivement** du nom du dossier.
 * `middleware`
 * `application`
 
-📌 Toute autre catégorie est **interdite**.
+📌 Le standard indique qu’aucune autre catégorie n’est autorisée.
 
 ---
 
@@ -135,7 +135,7 @@ Composant de logique réutilisable **sans micro-ROS**.
 * logique algorithmique
 * providers, managers, helpers
 
-📌 Une library **ne touche jamais le hardware directement**.
+📌 En pratique, une library évite tout accès direct au hardware.
 
 ---
 
@@ -151,10 +151,10 @@ Composant d’intégration micro-ROS.
 * gestion QoS, time sync, allocateurs
 * adaptation entre monde embarqué et ROS
 
-📌 Un middleware :
+📌 Un middleware est généralement caractérisé par :
 
-* ❌ n’accède pas au hardware
-* ❌ ne contient pas de logique métier
+* ❌ pas d’accès direct au hardware
+* ❌ pas de logique métier
 
 ---
 
@@ -169,7 +169,7 @@ Composant d’orchestration métier réutilisable.
 * logique fonctionnelle de haut niveau
 * configuration runtime
 
-📌 Une application **ne hardcode rien**.
+📌 En pratique, une application privilégie la configuration runtime et évite les valeurs figées.
 
 ---
 
@@ -190,7 +190,7 @@ Toute logique qui :
 * règles de validité
 * temporisation fonctionnelle
 
-📌 La logique métier est **strictement interdite** dans `drv_*`.
+📌 Selon la séparation des responsabilités du standard, la logique métier n’a pas sa place dans `drv_*`.
 
 ---
 
@@ -209,7 +209,7 @@ typedef struct <component>_s <component>_t;
 * stabilité ABI
 * prévention des dépendances illégales
 
-📌 Toute structure interne exposée dans un header public est une **violation grave**.
+📌 Exposer une structure interne dans un header public correspond à une violation du standard.
 
 ---
 
@@ -229,7 +229,7 @@ include/<component_api>/
 * enums
 * defines
 
-📌 Tout symbole public **doit être namespacé**.
+📌 Tout symbole public est attendu comme namespacé.
 
 ---
 
