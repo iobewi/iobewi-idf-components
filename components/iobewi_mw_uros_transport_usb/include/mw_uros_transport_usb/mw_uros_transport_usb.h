@@ -28,6 +28,24 @@ extern "C" {
 esp_err_t mw_uros_transport_usb_init(const tinyusb_config_t *tinyusb_config);
 
 /**
+ * @brief Create a transport handle.
+ *
+ * @param out Output pointer receiving the allocated handle.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters, ESP_ERR_NO_MEM on allocation failure.
+ */
+esp_err_t mw_uros_transport_usb_new(mw_uros_transport_usb_t **out);
+
+/**
+ * @brief Destroy a transport handle created with mw_uros_transport_usb_new().
+ *
+ * @param handle Transport handle.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on invalid parameters.
+ */
+esp_err_t mw_uros_transport_usb_del(mw_uros_transport_usb_t *handle);
+
+/**
  * @brief Initialize USB-CDC logging (optional)
  *
  * Redirects ESP_LOG output to USB-CDC port 1 (port 0 is used for micro-ROS transport).

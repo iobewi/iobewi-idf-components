@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS
-        "src/mw_uros_transport_usb_init.c"
+        "src/mw_uros_transport_usb.c"
         "src/mw_uros_transport_usb_logging.c"
         "src/mw_uros_transport_usb_transport.c"
     INCLUDE_DIRS

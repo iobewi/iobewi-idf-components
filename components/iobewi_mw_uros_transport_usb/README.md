@@ -67,6 +67,13 @@ esp_err_t mw_uros_transport_usb_logging_deinit(void);
 esp_err_t mw_uros_transport_usb_init(const tinyusb_config_t *tinyusb_config);
 ```
 
+### Cycle de vie
+
+```c
+esp_err_t mw_uros_transport_usb_new(mw_uros_transport_usb_t **out);
+esp_err_t mw_uros_transport_usb_del(mw_uros_transport_usb_t *handle);
+```
+
 ## Utilisation
 
 ### Avec micro-ROS
