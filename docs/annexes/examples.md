@@ -240,9 +240,47 @@ idf_component_register(
 )
 ```
 
-👉 L’exemple évite de référencer un chemin de composant particulier.
+👉 L'exemple évite de référencer un chemin de composant particulier.
 👉 Il est recommandé de ne pas ajouter de `REQUIRES` manuellement ici : ESP-IDF résout via
 `EXTRA_COMPONENT_DIRS` + `idf_component.yml` / `REQUIRES` des composants.
+
+### ⚠️ Piège : `EXTRA_COMPONENT_DIRS` trop large
+
+**Problème fréquent** : Utiliser un chemin trop large dans `EXTRA_COMPONENT_DIRS` :
+
+```cmake
+# ❌ ÉVITER : inclut TOUS les composants du projet
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../../components"
+)
+```
+
+**Conséquences** :
+
+* CMake charge **tous** les composants du répertoire parent, même ceux non utilisés
+* Si un composant n'est pas compatible avec la cible (ex: `esp32s2`), la compilation échoue
+* Erreur typique : `Component "xxx" is not compatible with target "esp32s2"`
+* Ralentit la configuration CMake inutilement
+
+**Solution recommandée** : Inclure uniquement le composant nécessaire :
+
+```cmake
+# ✅ PRÉFÉRER : inclut uniquement le composant requis
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../../../components/iobewi_driver_xxx"
+)
+```
+
+**En cas d'erreur** :
+
+```bash
+# Nettoyer et reconfigurer
+rm -rf build
+idf.py set-target esp32s3  # ou votre cible
+```
+
+**Rationale** : Un exemple `basic_app` dépend généralement d'**un seul** composant.
+Inclure tout le répertoire parent crée des dépendances implicites non souhaitées.
 
 ---
 
@@ -369,13 +407,14 @@ Recommandations :
 
 ## 14. Erreurs fréquentes
 
-* exemple trop complexe (“mini-produit”)
+* exemple trop complexe ("mini-produit")
 * logique métier intégrée
 * duplication de code du composant
 * dépendance implicite non documentée
-* exemple qui masque une faiblesse de l’API
+* exemple qui masque une faiblesse de l'API
 * exemple qui impose une carte spécifique sans le dire
-* exemple qui dépend de timing réel (delays arbitraires) pour “fonctionner”
+* exemple qui dépend de timing réel (delays arbitraires) pour "fonctionner"
+* **`EXTRA_COMPONENT_DIRS` incluant tous les composants** au lieu d'uniquement celui requis (voir section 10)
 
 ---
 

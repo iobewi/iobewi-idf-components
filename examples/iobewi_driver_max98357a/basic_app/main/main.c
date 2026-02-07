@@ -32,10 +32,10 @@ void app_main(void)
     // Configuration du MAX98357A
     // Note: Adapter les GPIO selon votre matériel
     drv_max98357a_config_t cfg = {
-        .bclk_gpio = GPIO_NUM_14,      // I2S BCLK
-        .ws_gpio = GPIO_NUM_15,        // I2S LRCLK/WS
-        .dout_gpio = GPIO_NUM_16,      // I2S DOUT (vers DIN du MAX98357A)
-        .sd_mode_gpio = GPIO_NUM_17,   // Shutdown control
+        .bclk_gpio = GPIO_NUM_5,      // I2S BCLK
+        .ws_gpio = GPIO_NUM_6,        // I2S LRCLK/WS
+        .dout_gpio = GPIO_NUM_7,      // I2S DOUT (vers DIN du MAX98357A)
+        .sd_mode_gpio = GPIO_NUM_8,   // Shutdown control
         .sample_rate = 16000,          // 16 kHz
         .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
         .slot_mode = I2S_SLOT_MODE_MONO,

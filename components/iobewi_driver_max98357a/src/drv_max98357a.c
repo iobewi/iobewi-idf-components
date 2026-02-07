@@ -1,6 +1,7 @@
 #include "drv_max98357a/drv_max98357a.h"
 
 #include <string.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
