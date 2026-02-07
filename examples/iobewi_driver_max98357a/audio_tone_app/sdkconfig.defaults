@@ -1,0 +1,16 @@
+# MAX98357A Audio Tone App - Default Configuration
+
+# Enable ESP-IDF driver components
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# Log level
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+
+# I2S configuration
+CONFIG_ESP_DRIVER_I2S_ENABLE=y
+
+# Math library (for sine wave generation)
+CONFIG_NEWLIB_NANO_FORMAT=n
