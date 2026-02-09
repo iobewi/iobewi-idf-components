@@ -1,0 +1,74 @@
+menu "HLS Stream Player Configuration"
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2).
+
+        config WIFI_MAXIMUM_RETRY
+            int "Maximum retry"
+            default 5
+            help
+                Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
+    endmenu
+
+    menu "Stream Configuration"
+        config HLS_STREAM_URL
+            string "HLS/M3U8 Stream URL"
+            default "http://stream.example.com/playlist.m3u8"
+            help
+                URL of the HLS/M3U8 stream to play.
+                Example: http://stream.live.vc.bbcmedia.co.uk/bbc_world_service
+
+        config STREAM_BUFFER_SIZE
+            int "Stream Buffer Size (KB)"
+            default 16
+            range 8 64
+            help
+                Size of the ring buffer for streaming data in KB.
+                Larger buffer = more latency but more resilient to network jitter.
+                Note: ESP32-S3 without PSRAM should use 16KB or less.
+    endmenu
+
+    menu "I2S Configuration"
+        config I2S_BCLK_PIN
+            int "I2S BCLK GPIO"
+            default 4
+            help
+                GPIO pin for I2S bit clock (BCLK).
+
+        config I2S_WS_PIN
+            int "I2S WS GPIO"
+            default 5
+            help
+                GPIO pin for I2S word select (WS/LRCLK).
+
+        config I2S_DOUT_PIN
+            int "I2S DOUT GPIO"
+            default 18
+            help
+                GPIO pin for I2S data out (DOUT).
+
+        config I2S_SD_MODE_PIN
+            int "SD_MODE GPIO"
+            default -1
+            help
+                GPIO pin for MAX98357A SD_MODE (shutdown control).
+                Set to -1 to disable.
+
+        config AUDIO_SAMPLE_RATE
+            int "Audio Sample Rate"
+            default 44100
+            help
+                Sample rate in Hz (typically 44100 or 48000).
+    endmenu
+
+endmenu

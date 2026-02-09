@@ -1,0 +1,17 @@
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+
+#EXTINF:9.9,
+http://example.com/segment001.aac
+#EXTINF:9.9,
+http://example.com/segment002.aac
+#EXTINF:9.9,
+http://example.com/segment003.aac
+#EXTINF:9.9,
+http://example.com/segment004.aac
+#EXTINF:9.9,
+http://example.com/segment005.aac
+
+#EXT-X-ENDLIST

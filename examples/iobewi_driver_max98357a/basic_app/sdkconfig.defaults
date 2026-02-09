@@ -9,5 +9,4 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
-# I2S configuration
-CONFIG_ESP_DRIVER_I2S_ENABLE=y
+# I2S configuration (driver is enabled by default in ESP-IDF v6.0+)

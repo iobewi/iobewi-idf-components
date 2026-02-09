@@ -1,0 +1,36 @@
+# Configuration pour HLS Stream App
+
+# Table de partitions personnalisée
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# CPU à vitesse maximale pour décodage AAC HIFI
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# Optimisations pour performance (pas taille) pour décodage audio
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+
+# Logs (réduire si nécessaire)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
+# Configuration I2S pour streaming audio fluide
+CONFIG_ESP_I2S_DMA_BUFFER_SIZE=1024
+CONFIG_ESP_I2S_DMA_BUFFER_COUNT=8
+
+# FreeRTOS - Augmenter la fréquence du tick pour meilleure réactivité audio
+CONFIG_FREERTOS_HZ=1000
+
+# LWIP - Fix pour bug ESP-IDF v6.1-dev avec PSRAM
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+
+# PSRAM - Essayer en mode Quad (plus courant sur ESP32-S3 standard)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768

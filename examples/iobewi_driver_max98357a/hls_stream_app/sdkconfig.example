@@ -1,0 +1,18 @@
+# Example configuration for HLS Stream App
+# Copy this file to sdkconfig.defaults or configure via idf.py menuconfig
+
+# WiFi Configuration
+CONFIG_WIFI_SSID="YourWiFiSSID"
+CONFIG_WIFI_PASSWORD="YourWiFiPassword"
+CONFIG_WIFI_MAXIMUM_RETRY=5
+
+# Stream Configuration
+CONFIG_HLS_STREAM_URL="http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
+CONFIG_STREAM_BUFFER_SIZE=32
+
+# I2S Configuration (ESP32-S3 DevKit example)
+CONFIG_I2S_BCLK_PIN=4
+CONFIG_I2S_WS_PIN=5
+CONFIG_I2S_DOUT_PIN=18
+CONFIG_I2S_SD_MODE_PIN=-1
+CONFIG_AUDIO_SAMPLE_RATE=44100
