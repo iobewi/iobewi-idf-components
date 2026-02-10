@@ -18,8 +18,11 @@
 
 static const char *TAG = "app_hls_player";
 
-// Buffer pour HTTP download (16KB)
-#define HTTP_BUFFER_SIZE (16 * 1024)
+// [RAM OPT P0.2] Buffer pour HTTP download
+// Réduit 16KB → 4KB (gain -12 KB par client HTTP actif)
+// 4KB suffisant pour streaming (chunks typiques ~2-8KB)
+// Si instabilité réseau/TLS : augmenter à 8KB
+#define HTTP_BUFFER_SIZE (4 * 1024)
 
 // Task Notification bits (remplace volatile flags pour thread-safety stricte SMP)
 #define NOTIF_STOP   (1u << 0)  /**< Signal d'arrêt */
@@ -292,6 +295,7 @@ static char* download_m3u8(const char *url)
 
     esp_http_client_config_t config = {
         .url = url,
+        .buffer_size = HTTP_BUFFER_SIZE,  // [RAM OPT P0.2] 4 KB (vs 16 KB défaut)
         .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .disable_auto_redirect = true,  // FIX: Log "non suivie" cohérent
