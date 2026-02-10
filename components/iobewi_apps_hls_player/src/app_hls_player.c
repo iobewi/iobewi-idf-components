@@ -212,18 +212,30 @@ static char* download_m3u8(const char *url)
     }
 
     // Lecture avec realloc progressif si nécessaire
-    // FIX: Compteur itérations pour éviter boucle infinie (timeout global)
-    int max_iterations = 1000;  // Protection contre read lent/bloqué
-    int iteration_count = 0;
+    // FIX: zero_read_streak pour gérer read_len==0 temporaire (certaines stacks/proxy)
+    int zero_read_streak = 0;
 
-    while (offset < (int)buffer_capacity - 1 && iteration_count < max_iterations) {
+    while (offset < (int)buffer_capacity - 1) {
         int to_read = (buffer_capacity - 1) - offset;
         int read_len = esp_http_client_read(client, buffer + offset, to_read);
-        if (read_len <= 0) {
+
+        if (read_len > 0) {
+            offset += read_len;
+            zero_read_streak = 0;  // Reset streak sur succès
+        } else if (read_len == 0) {
+            // FIX: read==0 peut être temporaire (pas forcément EOF)
+            if (++zero_read_streak > 5) {  // ~5 tentatives
+                ESP_LOGW(TAG, "M3U8: read_len==0 persistant (%d tentatives), fin lecture", zero_read_streak);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));  // Petit délai avant retry
+            continue;
+        } else {
+            // read_len < 0 : erreur HTTP
+            ESP_LOGE(TAG, "M3U8: erreur read_len=%d", read_len);
+            truncated = true;
             break;
         }
-        offset += read_len;
-        iteration_count++;
 
         // Si buffer plein et lecture continue, realloc
         if (offset >= (int)buffer_capacity - 1) {
