@@ -436,9 +436,21 @@ static void hls_fetch_task(void *pvParameters)
     ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
 
     int64_t last_sequence_number = -1;
-    bool playlist_valid = false;  // Défense : ne free que si playlist parsé avec succès
+
+    // Playlist hors boucle pour cleanup centralisé à task_exit
+    lib_m3u8_parser_playlist_t playlist;
+    memset(&playlist, 0, sizeof(playlist));
+    bool playlist_valid = false;
 
     while (true) {
+        // Reset systématique en début de cycle (défense bug logique)
+        // Si playlist_valid du cycle précédent, free avant de reset
+        if (playlist_valid) {
+            lib_m3u8_parser_free(&playlist);
+            playlist_valid = false;
+        }
+        memset(&playlist, 0, sizeof(playlist));
+
         // Check notification NOTIF_STOP sans bloquer
         uint32_t notif = 0;
         if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
@@ -476,10 +488,7 @@ static void hls_fetch_task(void *pvParameters)
             continue;
         }
 
-        // CRITICAL: memset avant parse pour garantir état propre si parse échoue
-        lib_m3u8_parser_playlist_t playlist;
-        memset(&playlist, 0, sizeof(playlist));
-
+        // playlist déjà memset en début de cycle
         esp_err_t ret = lib_m3u8_parser_parse(m3u8_content, handle->stream_url, &playlist);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Échec de parsing M3U8");
@@ -693,6 +702,12 @@ static void hls_fetch_task(void *pvParameters)
     }
 
 task_exit:
+    // Cleanup centralisé : free playlist si encore valide
+    if (playlist_valid) {
+        lib_m3u8_parser_free(&playlist);
+        playlist_valid = false;
+    }
+
     handle->is_downloading = false;
     ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
 
