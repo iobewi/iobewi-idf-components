@@ -736,7 +736,7 @@ static void audio_play_task(void *pvParameters)
             int16_t *samples = (int16_t *)decoded_buffer;
             size_t num_samples = out_frame.decoded_size / sizeof(int16_t);
             for (size_t i = 0; i < num_samples; i++) {
-                samples[i] = samples[i] / 4;
+                samples[i] >>= 2;  // FIX: Shift arithmétique au lieu de division (moins CPU)
             }
 
             // FIX #10: Timeout court au lieu de portMAX_DELAY pour permettre arrêt propre
@@ -841,13 +841,26 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
         return ESP_ERR_NO_MEM;
     }
 
-    handle->buffer_size = config->buffer_size;
+    // FIX: Clamper buffer_size entre min et max (robustesse API)
+    const size_t MIN_BUFFER_SIZE = 16 * 1024;   // 16 KB minimum
+    const size_t MAX_BUFFER_SIZE = 256 * 1024;  // 256 KB maximum
+    size_t buffer_size = config->buffer_size;
+
+    if (buffer_size < MIN_BUFFER_SIZE) {
+        ESP_LOGW(TAG, "buffer_size %zu trop petit, clamping à %zu", buffer_size, MIN_BUFFER_SIZE);
+        buffer_size = MIN_BUFFER_SIZE;
+    } else if (buffer_size > MAX_BUFFER_SIZE) {
+        ESP_LOGW(TAG, "buffer_size %zu trop grand, clamping à %zu", buffer_size, MAX_BUFFER_SIZE);
+        buffer_size = MAX_BUFFER_SIZE;
+    }
+
+    handle->buffer_size = buffer_size;
     handle->write_cb = config->write_cb;
     handle->write_ctx = config->write_ctx;
     handle->running = false;
 
     // Créer le ring buffer
-    handle->ring_buffer = xRingbufferCreate(config->buffer_size, RINGBUF_TYPE_BYTEBUF);
+    handle->ring_buffer = xRingbufferCreate(buffer_size, RINGBUF_TYPE_BYTEBUF);
     if (handle->ring_buffer == NULL) {
         ESP_LOGE(TAG, "Échec de création du ring buffer");
         free(handle->stream_url);
@@ -855,7 +868,7 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Ring buffer créé: %d bytes", config->buffer_size);
+    ESP_LOGI(TAG, "Ring buffer créé: %zu bytes", buffer_size);
 
     // Créer le sémaphore de téléchargement
     handle->download_semaphore = xSemaphoreCreateBinary();
@@ -945,9 +958,17 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     ret = xTaskCreate(audio_play_task, "audio_play", 6144, handle, 8, &handle->play_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de lecture");
+        // FIX CRITIQUE: Ne pas vTaskDelete brutal (peut laisser stack HTTP sale)
+        // Utiliser même logique que stop() : running=false + attendre fetch_done
         handle->running = false;
-        vTaskDelete(handle->fetch_task);
-        handle->fetch_task = NULL;  // FIX: Cleanup pour stop/del idempotent
+        if (handle->download_semaphore) {
+            xSemaphoreGive(handle->download_semaphore);  // Débloquer fetch_task
+        }
+        // Attendre terminaison propre de fetch_task
+        if (handle->fetch_done) {
+            xSemaphoreTake(handle->fetch_done, pdMS_TO_TICKS(5000));
+        }
+        handle->fetch_task = NULL;
         return ESP_FAIL;
     }
 
