@@ -21,6 +21,24 @@ static const char *TAG = "app_hls_player";
 // Buffer pour HTTP download (16KB)
 #define HTTP_BUFFER_SIZE (16 * 1024)
 
+// Task Notification bits (remplace volatile flags pour thread-safety stricte SMP)
+#define NOTIF_STOP   (1u << 0)  /**< Signal d'arrêt */
+#define NOTIF_RESET  (1u << 1)  /**< Signal reset décodeur (DISCONTINUITY) */
+
+// Tailles de buffers depuis Kconfig (avec fallback si non défini)
+#ifndef CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE
+    #define CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE 128
+#endif
+#ifndef CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE
+    #define CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE 144
+#endif
+#ifndef CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE
+    #define CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE 16
+#endif
+#ifndef CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
+    #define CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL 1
+#endif
+
 /**
  * @brief Structure interne du player HLS
  */
@@ -30,36 +48,66 @@ struct app_hls_player_s {
     size_t buffer_size;                     /**< Taille du buffer */
     TaskHandle_t fetch_task;                /**< Tâche de téléchargement */
     TaskHandle_t play_task;                 /**< Tâche de lecture/décodage */
-    volatile bool running;                  /**< FIX: volatile pour thread-safety (lu/écrit depuis 2 tasks) */
     size_t bytes_downloaded;                /**< Statistiques: bytes téléchargés */
     SemaphoreHandle_t download_semaphore;   /**< Sémaphore pour contrôle téléchargement */
     SemaphoreHandle_t stats_mutex;          /**< Mutex pour bytes_downloaded */
-    SemaphoreHandle_t fetch_done;           /**< FIX: Sémaphore signalant fin fetch_task */
-    SemaphoreHandle_t play_done;            /**< FIX: Sémaphore signalant fin play_task */
-    volatile bool is_downloading;           /**< Flag téléchargement en cours */
+    SemaphoreHandle_t fetch_done;           /**< Sémaphore signalant fin fetch_task */
+    SemaphoreHandle_t play_done;            /**< Sémaphore signalant fin play_task */
+    volatile bool is_downloading;           /**< Flag téléchargement en cours (lu par stats, OK volatile) */
     app_hls_player_write_cb_t write_cb;     /**< Callback d'écriture audio */
     void *write_ctx;                        /**< Contexte utilisateur pour callback */
-    int target_duration;                    /**< FIX #11: Target duration pour timeout refresh */
-    volatile bool needs_decoder_reset;      /**< FIX #14: Flag reset décodeur sur DISCONTINUITY */
+    int target_duration;                    /**< Target duration pour timeout refresh */
     uint32_t drop_count;                    /**< Compteur pertes ring buffer (rate limit log) */
+    uint32_t drop_old_count;                /**< Compteur drop-old (stratégie live-ness) */
 };
 
 /**
- * @brief Attente interruptible (check running toutes les 100ms max)
+ * @brief Helper pour lire header Location de manière sécurisée
+ * @return true si Location trouvé et copié, false sinon
  */
-static void interruptible_delay_ms(app_hls_player_t *handle, uint32_t ms)
+static bool get_location_header(esp_http_client_handle_t client, char *buf, size_t buf_size)
+{
+    if (!client || !buf || buf_size == 0) {
+        return false;
+    }
+
+    char *location = NULL;
+    esp_err_t err = esp_http_client_get_header(client, "Location", &location);
+
+    if (err == ESP_OK && location != NULL) {
+        strncpy(buf, location, buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief Attente interruptible avec check notifications NOTIF_STOP
+ */
+static bool interruptible_delay_ms(TaskHandle_t task, uint32_t ms)
 {
     const uint32_t step = 100;
-    while (ms > 0 && handle->running) {
+    while (ms > 0) {
         uint32_t this_step = (ms > step) ? step : ms;
-        vTaskDelay(pdMS_TO_TICKS(this_step));
+
+        // Check notification sans bloquer
+        uint32_t notif = 0;
+        if (xTaskNotifyWait(0, NOTIF_STOP, &notif, pdMS_TO_TICKS(this_step)) == pdTRUE) {
+            if (notif & NOTIF_STOP) {
+                return false;  // Stop demandé
+            }
+        }
+
         ms -= this_step;
     }
+    return true;  // Délai complet
 }
 
 /**
  * @brief Callback HTTP pour recevoir les données
- * FIX #1: Accepte chunked ET non-chunked
+ * FIX: Drop-old strategy pour meilleure live-ness
  */
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -67,16 +115,46 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
-            // FIX #1: Suppression du check is_chunked - accepter toutes les réponses
             if (evt->data_len > 0 && handle->ring_buffer) {
-                // FIX: Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
+                // Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
                 if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
-                    // FIX: Rate limit log 1/100 (compteur dans handle pour multi-instance)
-                    if ((++handle->drop_count % 100) == 0) {
+#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
+                    // Stratégie drop-old : retirer un chunk ancien pour faire de la place
+                    size_t drop_sz = 0;
+                    void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
+                    if (drop) {
+                        vRingbufferReturnItem(handle->ring_buffer, drop);
+                        handle->drop_old_count++;
+
+                        // Retenter l'envoi
+                        if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
+                            // Toujours plein même après drop
+                            handle->drop_count++;
+                            if ((handle->drop_count % 100) == 0) {
+                                ESP_LOGW(TAG, "Ring buffer plein après drop-old (new x%u, old x%u)",
+                                         (unsigned)handle->drop_count, (unsigned)handle->drop_old_count);
+                            }
+                        } else {
+                            // Succès après drop-old
+                            if ((handle->drop_old_count % 100) == 0) {
+                                ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
+                            }
+                            goto stats_update;
+                        }
+                    } else {
+                        // Rien à dropper (buffer vide ?)
+                        handle->drop_count++;
+                    }
+#else
+                    // Stratégie drop-new (classic)
+                    handle->drop_count++;
+                    if ((handle->drop_count % 100) == 0) {
                         ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)handle->drop_count);
                     }
+#endif
                 } else {
-                    // FIX #6: Protection concurrent access
+stats_update:
+                    // Succès - Update stats
                     if (handle->stats_mutex) {
                         xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
                         handle->bytes_downloaded += evt->data_len;
@@ -120,14 +198,16 @@ static esp_err_t download_segment(app_hls_player_t *handle, const char *url)
         int length = esp_http_client_get_content_length(client);
         ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
 
-        // FIX: Traiter status != 200/206 comme erreur (évite dérive silencieuse)
+        // Traiter status != 200/206 comme erreur (évite dérive silencieuse)
         if (status != 200 && status != 206) {
-            // FIX: Logger Location si redirection (debug terrain)
+            // Logger Location si redirection (debug terrain) - buffer local pour compat IDF
             if (status >= 300 && status < 400) {
-                char *location = NULL;
-                esp_http_client_get_header(client, "Location", &location);
-                ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status,
-                         location ? location : "unknown");
+                char location_buf[256];
+                if (get_location_header(client, location_buf, sizeof(location_buf))) {
+                    ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status, location_buf);
+                } else {
+                    ESP_LOGW(TAG, "HTTP redirection %d → (Location manquant)", status);
+                }
             } else {
                 ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
             }
@@ -152,7 +232,7 @@ static char* download_m3u8(const char *url)
 
     size_t free_heap = esp_get_free_heap_size();
     size_t min_heap = esp_get_minimum_free_heap_size();
-    ESP_LOGI(TAG, "Heap avant M3U8: libre=%u, min=%u", free_heap, min_heap);
+    ESP_LOGI(TAG, "Heap avant M3U8: libre=%zu, min=%zu", free_heap, min_heap);
 
     // FIX: Realloc progressif pour éviter overflow si chunked > 16KB
     // Allocation initiale 16KB, croissance par blocs de 16KB, max 64KB
@@ -198,10 +278,12 @@ static char* download_m3u8(const char *url)
     int status = esp_http_client_get_status_code(client);
     if (status != 200 && status != 206) {
         if (status >= 300 && status < 400) {
-            char *location = NULL;
-            esp_http_client_get_header(client, "Location", &location);
-            ESP_LOGW(TAG, "M3U8 HTTP redirection %d → %s (non suivie)", status,
-                     location ? location : "unknown");
+            char location_buf[256];
+            if (get_location_header(client, location_buf, sizeof(location_buf))) {
+                ESP_LOGW(TAG, "M3U8 HTTP redirection %d → %s (non suivie)", status, location_buf);
+            } else {
+                ESP_LOGW(TAG, "M3U8 HTTP redirection %d → (Location manquant)", status);
+            }
         } else {
             ESP_LOGE(TAG, "M3U8 HTTP status inattendu: %d (échec)", status);
         }
@@ -329,29 +411,34 @@ static char* download_m3u8(const char *url)
 static void hls_fetch_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
+    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
     ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
 
     int64_t last_sequence_number = -1;
 
-    while (handle->running) {
-        // FIX #11: Timeout périodique basé sur target_duration (RFC 8216 Section 6.3.4)
-        // "client MUST wait for at least the target duration before attempting to reload"
+    while (true) {
+        // Check notification NOTIF_STOP sans bloquer
+        uint32_t notif = 0;
+        if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+            ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
+            break;
+        }
+
+        // Timeout périodique basé sur target_duration (RFC 8216 Section 6.3.4)
         uint32_t refresh_timeout = (handle->target_duration > 0)
-                                   ? (handle->target_duration * 1000)  // En ms
-                                   : 10000;  // Fallback 10s si pas encore connu
+                                   ? (handle->target_duration * 1000)
+                                   : 10000;
 
         if (xSemaphoreTake(handle->download_semaphore, pdMS_TO_TICKS(refresh_timeout)) != pdTRUE) {
             // Timeout atteint → forcer refresh même si buffer OK (pour live)
-            ESP_LOGI(TAG, "Timeout refresh (%u ms) - vérification nouveaux segments", refresh_timeout);
-            if (!handle->running) {
-                break;
-            }
-            // Continuer vers download playlist (pas de continue ici)
+            ESP_LOGI(TAG, "Timeout refresh (%u ms) - vérification nouveaux segments", (unsigned)refresh_timeout);
         } else {
             ESP_LOGI(TAG, "Signal reçu - démarrage du téléchargement");
         }
 
-        if (!handle->running) {
+        // Recheck stop après semaphore
+        if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+            ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
             break;
         }
 
@@ -361,8 +448,9 @@ static void hls_fetch_task(void *pvParameters)
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
             handle->is_downloading = false;
-            // FIX: Attente interruptible de 5s
-            interruptible_delay_ms(handle, 5000);
+            if (!interruptible_delay_ms(current_task, 5000)) {
+                break;  // Stop demandé pendant le délai
+            }
             continue;
         }
 
@@ -372,8 +460,9 @@ static void hls_fetch_task(void *pvParameters)
             ESP_LOGE(TAG, "Échec de parsing M3U8");
             free(m3u8_content);
             handle->is_downloading = false;
-            // FIX: Attente interruptible de 5s
-            interruptible_delay_ms(handle, 5000);
+            if (!interruptible_delay_ms(current_task, 5000)) {
+                break;  // Stop demandé pendant le délai
+            }
             continue;
         }
 
@@ -449,8 +538,9 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
                 handle->is_downloading = false;
-                // FIX: Attente interruptible de 5s
-                interruptible_delay_ms(handle, 5000);
+                if (!interruptible_delay_ms(current_task, 5000)) {
+                    goto task_exit;  // Pas de free ici, déjà fait ligne ci-dessus
+                }
                 continue;
             }
 
@@ -461,7 +551,10 @@ static void hls_fetch_task(void *pvParameters)
                 free(m3u8_content);
                 handle->is_downloading = false;
                 // FIX: Attente interruptible de 5s
-                interruptible_delay_ms(handle, 5000);
+                if (!interruptible_delay_ms(current_task, 5000)) {
+                    lib_m3u8_parser_free(&playlist);
+                    goto task_exit;
+                }
                 continue;
             }
 
@@ -493,7 +586,14 @@ static void hls_fetch_task(void *pvParameters)
         }
 
         // Phase 2: Télécharger dans l'ordre inverse = ordre chronologique croissant
-        for (int k = to_download_count - 1; k >= 0 && handle->running; k--) {
+        for (int k = to_download_count - 1; k >= 0; k--) {
+            // Check stop avant chaque segment
+            if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+                ESP_LOGI(TAG, "NOTIF_STOP reçue pendant download - arrêt fetch_task");
+                lib_m3u8_parser_free(&playlist);
+                goto task_exit;
+            }
+
             int idx = to_download[k];
             const lib_m3u8_parser_segment_t *seg = &playlist.segments[idx];
 
@@ -501,10 +601,10 @@ static void hls_fetch_task(void *pvParameters)
                      (long long)seg->sequence, (to_download_count - k), to_download_count,
                      seg->discontinuity ? " [DISCONTINUITY]" : "");
 
-            // FIX #14: Signaler DISCONTINUITY pour reset décodeur
-            if (seg->discontinuity) {
-                ESP_LOGW(TAG, "DISCONTINUITY détectée → flag reset décodeur");
-                handle->needs_decoder_reset = true;
+            // Signaler DISCONTINUITY pour reset décodeur via task notification
+            if (seg->discontinuity && handle->play_task) {
+                ESP_LOGW(TAG, "DISCONTINUITY détectée → notification NOTIF_RESET vers play_task");
+                xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }
 
             esp_err_t err = download_segment(handle, seg->url);
@@ -555,9 +655,11 @@ static void hls_fetch_task(void *pvParameters)
         handle->is_downloading = false;
     }
 
+task_exit:
+    handle->is_downloading = false;
     ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
 
-    // FIX: Signaler fin de tâche via sémaphore (guard pour robustesse future)
+    // Signaler fin de tâche via sémaphore
     if (handle->fetch_done) {
         xSemaphoreGive(handle->fetch_done);
     }
@@ -570,6 +672,7 @@ static void hls_fetch_task(void *pvParameters)
 static void audio_play_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
+    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
     ESP_LOGI(TAG, "Démarrage de la task de lecture audio");
 
     // Créer le décodeur TS
@@ -593,8 +696,12 @@ static void audio_play_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Décodeur TS créé avec succès");
 
-    const size_t ENC_BUF_SIZE = 147456;  // 144KB
-    const size_t DEC_BUF_SIZE = 16384;   // 16KB
+    // Tailles de buffers depuis Kconfig
+    const size_t ENC_BUF_SIZE = CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE * 1024;
+    const size_t DEC_BUF_SIZE = CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE * 1024;
+
+    ESP_LOGI(TAG, "Buffers: enc=%zu KB, dec=%zu KB",
+             CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE, CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE);
 
     uint8_t *encoded_buffer = malloc(ENC_BUF_SIZE);
     int16_t *decoded_buffer = malloc(DEC_BUF_SIZE);
@@ -616,51 +723,58 @@ static void audio_play_task(void *pvParameters)
     ESP_LOGI(TAG, "Démarrage de la lecture audio...");
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    int decode_count = 0;  // FIX: non-static pour reset à chaque start
-    int error_count = 0;   // FIX: non-static pour reset à chaque start
+    int decode_count = 0;
+    int error_count = 0;
     bool download_signaled = false;
     bool was_downloading = false;
 
-    while (handle->running) {
-        // FIX #9: Calcul correct du niveau de buffer
+    while (true) {
+        // Check notifications sans bloquer
+        uint32_t notif = 0;
+        if (xTaskNotifyWait(0, NOTIF_STOP | NOTIF_RESET, &notif, 0) == pdTRUE) {
+            if (notif & NOTIF_STOP) {
+                ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt play_task");
+                break;
+            }
+            if (notif & NOTIF_RESET) {
+                ESP_LOGW(TAG, "NOTIF_RESET reçue - reset décodeur suite DISCONTINUITY");
+
+                // Vider le ring buffer pour éviter données corrompues
+                size_t item_size = 0;
+                void *item;
+                while ((item = xRingbufferReceive(handle->ring_buffer, &item_size, 0)) != NULL) {
+                    vRingbufferReturnItem(handle->ring_buffer, item);
+                }
+
+                // Reset buffer encodé local
+                buffered_size = 0;
+
+                // Recréer le décodeur pour reset état interne (PES, PAT/PMT, timestamps)
+                ESP_LOGI(TAG, "Fermeture décodeur...");
+                esp_audio_simple_dec_close(dec_handle);
+
+                ESP_LOGI(TAG, "Réouverture décodeur...");
+                dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
+                    ESP_LOGE(TAG, "Échec réouverture décodeur après DISCONTINUITY: %d", dec_ret);
+                    // Arrêt fatal, la tâche ne peut pas continuer
+                    free(encoded_buffer);
+                    free(decoded_buffer);
+                    if (handle->play_done) {
+                        xSemaphoreGive(handle->play_done);
+                    }
+                    vTaskDelete(NULL);
+                    return;
+                }
+
+                ESP_LOGI(TAG, "Décodeur recréé avec succès");
+            }
+        }
+
+        // Calcul du niveau de buffer
         size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
         size_t filled_size = handle->buffer_size - free_size;
         int buffer_level = (filled_size * 100) / handle->buffer_size;
-
-        // FIX #14: Gestion DISCONTINUITY - reset complet décodeur + flush buffers
-        if (handle->needs_decoder_reset) {
-            ESP_LOGW(TAG, "Reset décodeur suite DISCONTINUITY");
-            // FIX: Clear flag immédiatement pour éviter double reset si DISC arrive pendant reset
-            handle->needs_decoder_reset = false;
-
-            // Vider le ring buffer pour éviter données corrompues
-            size_t item_size = 0;
-            void *item;
-            while ((item = xRingbufferReceive(handle->ring_buffer, &item_size, 0)) != NULL) {
-                vRingbufferReturnItem(handle->ring_buffer, item);
-            }
-
-            // Reset buffer encodé local
-            buffered_size = 0;
-
-            // FIX: Recréer le décodeur pour reset état interne (PES, PAT/PMT, timestamps)
-            ESP_LOGI(TAG, "Fermeture décodeur...");
-            esp_audio_simple_dec_close(dec_handle);
-
-            ESP_LOGI(TAG, "Réouverture décodeur...");
-            dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
-            if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
-                ESP_LOGE(TAG, "Échec réouverture décodeur après DISCONTINUITY: %d", dec_ret);
-                // Arrêt fatal, la tâche ne peut pas continuer
-                if (handle->play_done) {
-                    xSemaphoreGive(handle->play_done);
-                }
-                vTaskDelete(NULL);
-                return;
-            }
-
-            ESP_LOGI(TAG, "Décodeur recréé avec succès");
-        }
 
         if (was_downloading && !handle->is_downloading) {
             download_signaled = false;
@@ -739,14 +853,11 @@ static void audio_play_task(void *pvParameters)
                 samples[i] >>= 2;  // FIX: Shift arithmétique au lieu de division (moins CPU)
             }
 
-            // FIX #10: Timeout court au lieu de portMAX_DELAY pour permettre arrêt propre
-            // FIX: Timeout en ticks (pas en ms) pour compatibilité I2S/stream
-            // FIX: 200ms pour stop réactif (au lieu de 1s)
+            // Timeout court (200ms) pour permettre arrêt réactif via NOTIF_STOP
             size_t bytes_written = 0;
-            uint32_t timeout = handle->running ? pdMS_TO_TICKS(200) : 0;  // 200ms en ticks si running, 0 sinon
             esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
                                              out_frame.decoded_size, &bytes_written,
-                                             timeout);
+                                             pdMS_TO_TICKS(200));
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Erreur d'écriture audio: %s", esp_err_to_name(err));
             }
@@ -841,10 +952,15 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
         return ESP_ERR_NO_MEM;
     }
 
-    // FIX: Clamper buffer_size entre min et max (robustesse API)
+    // Déterminer buffer_size (Kconfig si 0, sinon config utilisateur)
     const size_t MIN_BUFFER_SIZE = 16 * 1024;   // 16 KB minimum
     const size_t MAX_BUFFER_SIZE = 256 * 1024;  // 256 KB maximum
     size_t buffer_size = config->buffer_size;
+
+    if (buffer_size == 0) {
+        buffer_size = CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE * 1024;
+        ESP_LOGI(TAG, "buffer_size=0 → utilisation Kconfig: %zu KB", CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE);
+    }
 
     if (buffer_size < MIN_BUFFER_SIZE) {
         ESP_LOGW(TAG, "buffer_size %zu trop petit, clamping à %zu", buffer_size, MIN_BUFFER_SIZE);
@@ -857,7 +973,6 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
     handle->buffer_size = buffer_size;
     handle->write_cb = config->write_cb;
     handle->write_ctx = config->write_ctx;
-    handle->running = false;
 
     // Créer le ring buffer
     handle->ring_buffer = xRingbufferCreate(buffer_size, RINGBUF_TYPE_BYTEBUF);
@@ -918,16 +1033,16 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (handle->running) {
+    if (handle->fetch_task != NULL || handle->play_task != NULL) {
         ESP_LOGW(TAG, "Le player est déjà démarré");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // FIX: Vider sémaphores done AVANT running=true (évite races si stop appelé pendant start)
+    // Vider sémaphores done AVANT création tâches (évite races si stop appelé pendant start)
     xSemaphoreTake(handle->fetch_done, 0);
     xSemaphoreTake(handle->play_done, 0);
 
-    // FIX: Vider ring buffer pour garantir silence au démarrage (pas de données résiduelles)
+    // Vider ring buffer pour garantir démarrage propre (pas de données résiduelles)
     if (handle->ring_buffer) {
         size_t item_size = 0;
         void *item;
@@ -936,13 +1051,12 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
         }
     }
 
-    // FIX: Réinitialiser états avant démarrage
+    // Réinitialiser états avant démarrage
     handle->bytes_downloaded = 0;
     handle->is_downloading = false;
-    handle->needs_decoder_reset = false;
-    handle->target_duration = 0;  // Sera mis à jour par premier parsing
-    handle->drop_count = 0;  // Reset compteur pertes ring buffer
-    handle->running = true;
+    handle->target_duration = 0;
+    handle->drop_count = 0;
+    handle->drop_old_count = 0;
 
     // Signal initial pour déclencher le premier téléchargement
     xSemaphoreGive(handle->download_semaphore);
@@ -951,7 +1065,6 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     BaseType_t ret = xTaskCreate(hls_fetch_task, "hls_fetch", 14336, handle, 5, &handle->fetch_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de téléchargement");
-        handle->running = false;
         return ESP_FAIL;
     }
 
@@ -959,8 +1072,10 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de lecture");
         // FIX CRITIQUE: Ne pas vTaskDelete brutal (peut laisser stack HTTP sale)
-        // Utiliser même logique que stop() : running=false + attendre fetch_done
-        handle->running = false;
+        // Utiliser même logique que stop() : notify NOTIF_STOP + attendre fetch_done
+        if (handle->fetch_task) {
+            xTaskNotify(handle->fetch_task, NOTIF_STOP, eSetBits);
+        }
         if (handle->download_semaphore) {
             xSemaphoreGive(handle->download_semaphore);  // Débloquer fetch_task
         }
@@ -969,6 +1084,7 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
             xSemaphoreTake(handle->fetch_done, pdMS_TO_TICKS(5000));
         }
         handle->fetch_task = NULL;
+        handle->play_task = NULL;
         return ESP_FAIL;
     }
 
@@ -982,20 +1098,27 @@ esp_err_t app_hls_player_stop(app_hls_player_t *handle)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!handle->running) {
-        return ESP_OK;
+    if (handle->fetch_task == NULL && handle->play_task == NULL) {
+        return ESP_OK;  // Déjà arrêté
     }
 
     ESP_LOGI(TAG, "Arrêt du player HLS...");
-    handle->running = false;
-    handle->is_downloading = false;  // FIX: Reset état download immédiatement
+    handle->is_downloading = false;
+
+    // Envoyer NOTIF_STOP aux deux tâches
+    if (handle->fetch_task) {
+        xTaskNotify(handle->fetch_task, NOTIF_STOP, eSetBits);
+    }
+    if (handle->play_task) {
+        xTaskNotify(handle->play_task, NOTIF_STOP, eSetBits);
+    }
 
     // Débloquer la tâche de téléchargement
     if (handle->download_semaphore) {
         xSemaphoreGive(handle->download_semaphore);
     }
 
-    // FIX: Attendre la terminaison des tâches via sémaphores done
+    // Attendre la terminaison des tâches via sémaphores done
     if (handle->fetch_task) {
         ESP_LOGI(TAG, "Attente terminaison fetch_task...");
         if (xSemaphoreTake(handle->fetch_done, pdMS_TO_TICKS(5000)) != pdTRUE) {
@@ -1022,7 +1145,7 @@ esp_err_t app_hls_player_get_stats(app_hls_player_t *handle, app_hls_player_stat
         return ESP_ERR_INVALID_ARG;
     }
 
-    // FIX #6: Protection concurrent access
+    // Protection concurrent access
     if (handle->stats_mutex) {
         xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
         stats->bytes_downloaded = handle->bytes_downloaded;
@@ -1031,7 +1154,7 @@ esp_err_t app_hls_player_get_stats(app_hls_player_t *handle, app_hls_player_stat
         stats->bytes_downloaded = 0;
     }
 
-    stats->is_playing = handle->running;
+    stats->is_playing = (handle->fetch_task != NULL) || (handle->play_task != NULL);
 
     if (handle->ring_buffer) {
         // FIX #9: Calcul correct du niveau de buffer
@@ -1052,7 +1175,7 @@ esp_err_t app_hls_player_del(app_hls_player_t *handle)
     }
 
     // Arrêter si nécessaire (avec synchronisation)
-    if (handle->running) {
+    if (handle->fetch_task != NULL || handle->play_task != NULL) {
         app_hls_player_stop(handle);
     }
 

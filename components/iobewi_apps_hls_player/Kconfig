@@ -1,0 +1,53 @@
+menu "HLS Player Configuration"
+
+    config APP_HLS_PLAYER_RING_BUFFER_SIZE
+        int "Ring buffer size (KB)"
+        default 128 if SPIRAM
+        default 64 if !SPIRAM
+        range 32 256
+        help
+            Size of the ring buffer for streaming data in KB.
+
+            Recommended values:
+            - With PSRAM: 128-256 KB (better resilience to jitter)
+            - Without PSRAM: 64-96 KB (balance RAM/stability)
+
+            Larger buffer = more latency but more resilient to network jitter.
+
+    config APP_HLS_PLAYER_ENC_BUFFER_SIZE
+        int "Encoded buffer size (KB)"
+        default 144 if SPIRAM
+        default 64 if !SPIRAM
+        range 32 192
+        help
+            Size of the internal encoder buffer for TS demux/decode in KB.
+
+            Recommended values:
+            - With PSRAM: 96-144 KB (handles large TS packets)
+            - Without PSRAM: 48-64 KB (minimum viable)
+
+            This buffer accumulates encoded data before passing to decoder.
+            Too small = frequent underruns, too large = wasted RAM.
+
+    config APP_HLS_PLAYER_DEC_BUFFER_SIZE
+        int "Decoded buffer size (KB)"
+        default 16
+        range 8 32
+        help
+            Size of the output PCM buffer in KB.
+
+            Default 16 KB is sufficient for most cases (48kHz stereo).
+            Only increase if you experience audio glitches with high sample rates.
+
+    config APP_HLS_PLAYER_DROP_OLD_ON_FULL
+        bool "Drop old data when ring buffer full (recommended)"
+        default y
+        help
+            When enabled, drops oldest chunk from ring buffer to make room for new data.
+            This improves live-ness by keeping the stream fresh.
+
+            When disabled, drops new data (classic behavior) which can cause temporal drift.
+
+            Recommended: ENABLED for live streams, DISABLED for VOD.
+
+endmenu
