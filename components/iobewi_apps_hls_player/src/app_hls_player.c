@@ -118,6 +118,16 @@ static bool interruptible_delay_ms(uint32_t ms)
 }
 
 /**
+ * @brief Check immédiat si NOTIF_STOP est présente (sans bloquer)
+ * @return true si STOP demandé, false sinon
+ */
+static inline bool hls_should_stop_now(void)
+{
+    uint32_t notif = 0;
+    return (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE) && (notif & NOTIF_STOP);
+}
+
+/**
  * @brief Callback HTTP pour recevoir les données
  * Drop-old strategy pour meilleure live-ness
  */
@@ -459,8 +469,7 @@ static void hls_fetch_task(void *pvParameters)
         memset(&playlist, 0, sizeof(playlist));
 
         // Check notification NOTIF_STOP sans bloquer
-        uint32_t notif = 0;
-        if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+        if (hls_should_stop_now()) {
             ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
             break;
         }
@@ -478,7 +487,7 @@ static void hls_fetch_task(void *pvParameters)
         }
 
         // Recheck stop après semaphore
-        if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+        if (hls_should_stop_now()) {
             ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
             break;
         }
@@ -493,6 +502,13 @@ static void hls_fetch_task(void *pvParameters)
                 break;  // Stop demandé pendant le délai
             }
             continue;
+        }
+
+        // CHECK STOP après download, avant parse (optimisation latence d'arrêt)
+        if (hls_should_stop_now()) {
+            free(m3u8_content);
+            handle->is_downloading = false;
+            goto task_exit;
         }
 
         // playlist déjà memset en début de cycle
@@ -588,6 +604,15 @@ static void hls_fetch_task(void *pvParameters)
                 continue;
             }
 
+            // CHECK STOP après download media playlist, avant parse (optimisation latence)
+            if (hls_should_stop_now()) {
+                free(m3u8_content);
+                lib_m3u8_parser_free(&playlist);
+                playlist_valid = false;
+                handle->is_downloading = false;
+                goto task_exit;
+            }
+
             lib_m3u8_parser_free(&playlist);
             playlist_valid = false;
             // CRITICAL: memset après free pour garantir état propre avant parse
@@ -636,7 +661,7 @@ static void hls_fetch_task(void *pvParameters)
         // Phase 2: Télécharger dans l'ordre inverse = ordre chronologique croissant
         for (int k = to_download_count - 1; k >= 0; k--) {
             // Check stop avant chaque segment
-            if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
+            if (hls_should_stop_now()) {
                 ESP_LOGI(TAG, "NOTIF_STOP reçue pendant download - arrêt fetch_task");
                 if (playlist_valid) {
                     lib_m3u8_parser_free(&playlist);
