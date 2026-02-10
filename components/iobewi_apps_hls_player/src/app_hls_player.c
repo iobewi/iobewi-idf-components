@@ -55,7 +55,8 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         case HTTP_EVENT_ON_DATA:
             // FIX #1: Suppression du check is_chunked - accepter toutes les réponses
             if (evt->data_len > 0 && handle->ring_buffer) {
-                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                // FIX: Timeout 10ms au lieu de 1000ms pour éviter de bloquer la stack HTTP
+                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, pdMS_TO_TICKS(10)) != pdTRUE) {
                     ESP_LOGW(TAG, "Ring buffer plein, données perdues");
                 } else {
                     // FIX #6: Protection concurrent access
@@ -121,11 +122,16 @@ static char* download_m3u8(const char *url)
     size_t min_heap = esp_get_minimum_free_heap_size();
     ESP_LOGI(TAG, "Heap avant M3U8: libre=%u, min=%u", free_heap, min_heap);
 
-    // FIX: 16KB pour playlists complexes (variants multiples, URLs longues, DRM tags)
-    const size_t M3U8_MAX_SIZE = 16 * 1024;
-    char *buffer = malloc(M3U8_MAX_SIZE);
+    // FIX: Realloc progressif pour éviter overflow si chunked > 16KB
+    // Allocation initiale 16KB, croissance par blocs de 16KB, max 64KB
+    const size_t M3U8_INITIAL_SIZE = 16 * 1024;
+    const size_t M3U8_GROW_SIZE = 16 * 1024;
+    const size_t M3U8_MAX_SIZE = 64 * 1024;
+
+    size_t buffer_capacity = M3U8_INITIAL_SIZE;
+    char *buffer = malloc(buffer_capacity);
     if (buffer == NULL) {
-        ESP_LOGE(TAG, "Échec d'allocation pour M3U8 (16KB)");
+        ESP_LOGE(TAG, "Échec d'allocation pour M3U8 (%u bytes)", (unsigned)buffer_capacity);
         return NULL;
     }
 
@@ -154,28 +160,63 @@ static char* download_m3u8(const char *url)
 
     int content_length = esp_http_client_fetch_headers(client);
 
-    // FIX: Gérer content_length inconnu (chunked encoding)
-    if (content_length < 0) {
-        ESP_LOGW(TAG, "M3U8 content-length inconnu (chunked?), lecture limitée à %u bytes",
-                 (unsigned)M3U8_MAX_SIZE);
-    } else if (content_length > (int)M3U8_MAX_SIZE) {
-        ESP_LOGE(TAG, "M3U8 trop grand: %d bytes (max %u)", content_length, (unsigned)M3U8_MAX_SIZE);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        free(buffer);
-        return NULL;
+    // Si content-length connu et > capacité initiale, realloc immédiatement
+    if (content_length > 0 && (size_t)content_length >= buffer_capacity) {
+        size_t new_capacity = content_length + 1;  // +1 pour '\0'
+        if (new_capacity > M3U8_MAX_SIZE) {
+            ESP_LOGE(TAG, "M3U8 trop grand: %d bytes (max %u)", content_length, (unsigned)M3U8_MAX_SIZE);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            free(buffer);
+            return NULL;
+        }
+        char *new_buffer = realloc(buffer, new_capacity);
+        if (new_buffer == NULL) {
+            ESP_LOGE(TAG, "Échec realloc M3U8 à %u bytes", (unsigned)new_capacity);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            free(buffer);
+            return NULL;
+        }
+        buffer = new_buffer;
+        buffer_capacity = new_capacity;
+        ESP_LOGI(TAG, "M3U8 realloc à %u bytes (content-length=%d)", (unsigned)buffer_capacity, content_length);
+    } else if (content_length < 0) {
+        ESP_LOGW(TAG, "M3U8 content-length inconnu (chunked), realloc progressif activé");
     } else {
         ESP_LOGI(TAG, "M3U8 content-length: %d bytes", content_length);
     }
 
-    // FIX #5: Lire seulement ce qui reste dans le buffer
-    while (offset < M3U8_MAX_SIZE - 1) {
-        int to_read = (M3U8_MAX_SIZE - 1) - offset;
+    // Lecture avec realloc progressif si nécessaire
+    while (offset < (int)buffer_capacity - 1) {
+        int to_read = (buffer_capacity - 1) - offset;
         int read_len = esp_http_client_read(client, buffer + offset, to_read);
         if (read_len <= 0) {
             break;
         }
         offset += read_len;
+
+        // Si buffer plein et lecture continue, realloc
+        if (offset >= (int)buffer_capacity - 1) {
+            if (buffer_capacity >= M3U8_MAX_SIZE) {
+                ESP_LOGE(TAG, "M3U8 atteint limite max %u bytes, arrêt lecture", (unsigned)M3U8_MAX_SIZE);
+                break;
+            }
+
+            size_t new_capacity = buffer_capacity + M3U8_GROW_SIZE;
+            if (new_capacity > M3U8_MAX_SIZE) {
+                new_capacity = M3U8_MAX_SIZE;
+            }
+
+            char *new_buffer = realloc(buffer, new_capacity);
+            if (new_buffer == NULL) {
+                ESP_LOGE(TAG, "Échec realloc progressif à %u bytes", (unsigned)new_capacity);
+                break;
+            }
+            buffer = new_buffer;
+            buffer_capacity = new_capacity;
+            ESP_LOGI(TAG, "M3U8 realloc progressif: %u bytes", (unsigned)buffer_capacity);
+        }
     }
 
     buffer[offset] = '\0';
@@ -187,12 +228,7 @@ static char* download_m3u8(const char *url)
         return NULL;
     }
 
-    // FIX: Warn si possiblement tronqué
-    if (offset >= (int)(M3U8_MAX_SIZE - 1)) {
-        ESP_LOGW(TAG, "M3U8 possiblement tronqué (lecture limitée à %u bytes)", (unsigned)M3U8_MAX_SIZE);
-    }
-
-    ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes", offset);
+    ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %u)", offset, (unsigned)buffer_capacity);
     return buffer;
 }
 
@@ -234,7 +270,10 @@ static void hls_fetch_task(void *pvParameters)
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
             handle->is_downloading = false;
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            // FIX: Attente interruptible de 5s (check running toutes les 100ms)
+            for (int i = 0; i < 50 && handle->running; i++) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
             continue;
         }
 
@@ -244,7 +283,10 @@ static void hls_fetch_task(void *pvParameters)
             ESP_LOGE(TAG, "Échec de parsing M3U8");
             free(m3u8_content);
             handle->is_downloading = false;
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            // FIX: Attente interruptible de 5s (check running toutes les 100ms)
+            for (int i = 0; i < 50 && handle->running; i++) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
             continue;
         }
 
@@ -320,7 +362,10 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
                 handle->is_downloading = false;
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                // FIX: Attente interruptible de 5s (check running toutes les 100ms)
+                for (int i = 0; i < 50 && handle->running; i++) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
                 continue;
             }
 
@@ -330,7 +375,10 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de parsing de la media playlist");
                 free(m3u8_content);
                 handle->is_downloading = false;
-                vTaskDelay(pdMS_TO_TICKS(5000));
+                // FIX: Attente interruptible de 5s (check running toutes les 100ms)
+                for (int i = 0; i < 50 && handle->running; i++) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
                 continue;
             }
 
