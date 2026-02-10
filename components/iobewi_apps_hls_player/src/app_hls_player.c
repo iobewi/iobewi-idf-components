@@ -105,6 +105,7 @@ static esp_err_t download_segment(app_hls_player_t *handle, const char *url)
         .buffer_size = HTTP_BUFFER_SIZE,
         .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_redirect = true,  // FIX: Log "non suivie" cohérent
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -173,6 +174,7 @@ static char* download_m3u8(const char *url)
         .url = url,
         .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_redirect = true,  // FIX: Log "non suivie" cohérent
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -191,6 +193,23 @@ static char* download_m3u8(const char *url)
     }
 
     int content_length = esp_http_client_fetch_headers(client);
+
+    // CRITIQUE: Vérifier le status HTTP avant de lire le corps (évite parser HTML d'erreur)
+    int status = esp_http_client_get_status_code(client);
+    if (status != 200 && status != 206) {
+        if (status >= 300 && status < 400) {
+            char *location = NULL;
+            esp_http_client_get_header(client, "Location", &location);
+            ESP_LOGW(TAG, "M3U8 HTTP redirection %d → %s (non suivie)", status,
+                     location ? location : "unknown");
+        } else {
+            ESP_LOGE(TAG, "M3U8 HTTP status inattendu: %d (échec)", status);
+        }
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        free(buffer);
+        return NULL;
+    }
 
     // Si content-length connu et > capacité initiale, realloc immédiatement
     if (content_length > 0 && (size_t)content_length >= buffer_capacity) {
