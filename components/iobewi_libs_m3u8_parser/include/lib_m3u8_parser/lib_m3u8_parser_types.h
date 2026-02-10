@@ -48,23 +48,39 @@ typedef struct {
 
 /**
  * @brief Structure représentant une playlist M3U8 parsée
+ *
+ * OPTIMISATION RAM (P0): Union segments/variants
+ * Une playlist est SOIT media (segments) SOIT master (variants), jamais les deux.
+ * L'union réduit l'empreinte mémoire de ~50% (~19KB → ~10KB).
+ *
+ * Les macros de compatibilité permettent d'accéder aux champs comme avant :
+ *   playlist->segments[i]       // accès aux segments (media playlist)
+ *   playlist->variants[i]       // accès aux variants (master playlist)
+ *   playlist->segment_count     // nombre de segments
+ *   playlist->variant_count     // nombre de variants
  */
 typedef struct {
-    // Pour media playlists (segments)
-    lib_m3u8_parser_segment_t segments[LIB_M3U8_PARSER_MAX_SEGMENTS];  /**< Tableau de segments */
-    int segment_count;                                                   /**< Nombre de segments */
+    // Union : segments OU variants (jamais les deux simultanément)
+    union {
+        lib_m3u8_parser_segment_t segments[LIB_M3U8_PARSER_MAX_SEGMENTS];  /**< Segments (media playlist) */
+        lib_m3u8_parser_variant_t variants[LIB_M3U8_PARSER_MAX_SEGMENTS];  /**< Variants (master playlist) */
+    } items;
 
-    // Pour master playlists (variants)
-    lib_m3u8_parser_variant_t variants[LIB_M3U8_PARSER_MAX_SEGMENTS];   /**< Tableau de variants */
-    int variant_count;                                                   /**< Nombre de variants */
+    int item_count;  /**< Nombre d'items (segments ou variants selon is_master_playlist) */
 
     // Métadonnées communes
-    bool is_live;                                                        /**< true si playlist live */
-    int target_duration;                                                 /**< Durée cible des segments en secondes */
-    bool is_master_playlist;                                             /**< true si master playlist (variant streams) */
-    int64_t media_sequence;                                              /**< Premier numéro de séquence (live) */
-    int version;                                                         /**< Version HLS (EXT-X-VERSION) */
+    bool is_live;                 /**< true si playlist live */
+    int target_duration;          /**< Durée cible des segments en secondes */
+    bool is_master_playlist;      /**< true si master playlist (variants), false si media (segments) */
+    int64_t media_sequence;       /**< Premier numéro de séquence (live, media playlist uniquement) */
+    int version;                  /**< Version HLS (EXT-X-VERSION) */
 } lib_m3u8_parser_playlist_t;
+
+// Macros de compatibilité API (permettent d'utiliser l'ancienne syntaxe)
+#define segments items.segments
+#define variants items.variants
+#define segment_count item_count
+#define variant_count item_count
 
 #ifdef __cplusplus
 }
