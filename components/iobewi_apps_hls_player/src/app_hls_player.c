@@ -459,6 +459,11 @@ static void hls_fetch_task(void *pvParameters)
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
     ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
 
+    // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
+    UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes)",
+             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t));
+
     int64_t last_sequence_number = -1;
 
     // Playlist hors boucle pour cleanup centralisé à task_exit
@@ -753,6 +758,12 @@ task_exit:
     handle->is_downloading = false;
     ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
 
+    // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
+    UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
+             pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
+             14336 - (hwm_final * sizeof(StackType_t)));
+
     // Signaler fin de tâche via sémaphore
     if (handle->fetch_done) {
         xSemaphoreGive(handle->fetch_done);
@@ -767,6 +778,11 @@ static void audio_play_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
     ESP_LOGI(TAG, "Démarrage de la task de lecture audio");
+
+    // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
+    UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes)",
+             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t));
 
     // Créer le décodeur TS
     esp_audio_simple_dec_handle_t dec_handle = NULL;
@@ -996,6 +1012,12 @@ static void audio_play_task(void *pvParameters)
     free(decoded_buffer);
 
     ESP_LOGI(TAG, "Arrêt de la task de lecture audio");
+
+    // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
+    UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
+             pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
+             6144 - (hwm_final * sizeof(StackType_t)));
 
     // FIX: Signaler fin de tâche via sémaphore (guard pour robustesse future)
     if (handle->play_done) {
