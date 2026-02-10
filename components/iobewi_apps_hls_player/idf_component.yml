@@ -1,0 +1,8 @@
+## IDF Component Manager Manifest File
+dependencies:
+  iobewi_libs_m3u8_parser:
+    path: ../iobewi_libs_m3u8_parser
+  espressif/esp_audio_codec:
+    version: "^2.3.0"
+  idf:
+    version: ">=5.0.0"

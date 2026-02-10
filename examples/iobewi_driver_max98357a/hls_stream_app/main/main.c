@@ -1,26 +1,32 @@
+/**
+ * @file main.c
+ * @brief Exemple de streaming HLS avec MAX98357A
+ *
+ * Cet exemple démontre l'utilisation de app_hls_player avec le driver MAX98357A
+ * pour diffuser un flux audio HLS (HTTP Live Streaming).
+ */
+
 #include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
 #include "nvs_flash.h"
-#include "esp_heap_caps.h"
 
 #include "drv_max98357a/drv_max98357a.h"
-#include "wifi_helper.h"
-#include "stream_player.h"
+#include "app_hls_player/app_hls_player.h"
 #include "decoder/impl/esp_aac_dec.h"
 #include "simple_dec/impl/esp_ts_dec.h"
 
-static const char *TAG = "main";
+static const char *TAG = "hls_stream_app";
 
 // Configuration depuis menuconfig
 #define WIFI_SSID           CONFIG_WIFI_SSID
 #define WIFI_PASSWORD       CONFIG_WIFI_PASSWORD
 #define WIFI_MAX_RETRY      CONFIG_WIFI_MAXIMUM_RETRY
 #define HLS_STREAM_URL      CONFIG_HLS_STREAM_URL
-#define STREAM_BUFFER_SIZE  (CONFIG_STREAM_BUFFER_SIZE * 1024)
 
 #define I2S_BCLK_PIN        CONFIG_I2S_BCLK_PIN
 #define I2S_WS_PIN          CONFIG_I2S_WS_PIN
@@ -28,91 +34,93 @@ static const char *TAG = "main";
 #define I2S_SD_MODE_PIN     CONFIG_I2S_SD_MODE_PIN
 #define AUDIO_SAMPLE_RATE   CONFIG_AUDIO_SAMPLE_RATE
 
-static drv_max98357a_t *s_driver = NULL;
+static int s_wifi_retry_num = 0;
 
 /**
- * @brief Initialise la mémoire NVS
+ * @brief Callback d'écriture audio pour app_hls_player
+ *
+ * Ce callback reçoit les données PCM décodées et les envoie au driver MAX98357A
  */
-static esp_err_t init_nvs(void)
+static esp_err_t audio_write_callback(void *user_ctx, const void *data,
+                                       size_t size, size_t *bytes_written,
+                                       uint32_t timeout_ms)
 {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "Effacement de la partition NVS");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    return ret;
+    drv_max98357a_t *driver = (drv_max98357a_t *)user_ctx;
+    return drv_max98357a_write(driver, data, size, bytes_written, timeout_ms);
 }
 
 /**
- * @brief Initialise le driver MAX98357A
+ * @brief Gestionnaire d'événements WiFi
  */
-static esp_err_t init_audio_driver(void)
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
 {
-    drv_max98357a_config_t driver_config = {
-        .bclk_gpio = I2S_BCLK_PIN,
-        .ws_gpio = I2S_WS_PIN,
-        .dout_gpio = I2S_DOUT_PIN,
-        .sd_mode_gpio = (I2S_SD_MODE_PIN >= 0) ? I2S_SD_MODE_PIN : GPIO_NUM_NC,
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
-        .slot_mode = I2S_SLOT_MODE_STEREO,
-        .gain = DRV_MAX98357A_GAIN_3DB,  // Réduit de 9dB à 3dB pour volume plus bas
-        .dma_buf_count = 8,      // Augmenté de 6 à 8 buffers
-        .dma_buf_len = 512,      // Réduit à 512 (max 1023 mais 512 est optimal)
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_wifi_retry_num < WIFI_MAX_RETRY) {
+            esp_wifi_connect();
+            s_wifi_retry_num++;
+            ESP_LOGI(TAG, "Tentative de reconnexion WiFi (%d/%d)", s_wifi_retry_num, WIFI_MAX_RETRY);
+        } else {
+            ESP_LOGE(TAG, "Échec de connexion WiFi après %d tentatives", WIFI_MAX_RETRY);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "WiFi connecté, IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_wifi_retry_num = 0;
+    }
+}
+
+/**
+ * @brief Initialise et connecte le WiFi
+ */
+static esp_err_t init_wifi(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
     };
 
-    ESP_LOGI(TAG, "Initialisation du driver MAX98357A");
-    ESP_LOGI(TAG, "  Sample rate: %d Hz", AUDIO_SAMPLE_RATE);
-    ESP_LOGI(TAG, "  BCLK: GPIO%d, WS: GPIO%d, DOUT: GPIO%d",
-             I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN);
-    if (I2S_SD_MODE_PIN >= 0) {
-        ESP_LOGI(TAG, "  SD_MODE: GPIO%d", I2S_SD_MODE_PIN);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "Connexion au WiFi SSID: %s", WIFI_SSID);
+
+    // Attendre la connexion (max 30 secondes)
+    int wait_time = 0;
+    while (s_wifi_retry_num < WIFI_MAX_RETRY && wait_time < 30) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        wait_time++;
     }
 
-    esp_err_t ret = drv_max98357a_new(&driver_config, &s_driver);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Échec de création du driver: %s", esp_err_to_name(ret));
-        return ret;
+    if (s_wifi_retry_num >= WIFI_MAX_RETRY) {
+        return ESP_FAIL;
     }
 
-    ret = drv_max98357a_enable(s_driver);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Échec d'activation du driver: %s", esp_err_to_name(ret));
-        drv_max98357a_del(s_driver);
-        s_driver = NULL;
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Driver MAX98357A initialisé avec succès");
     return ESP_OK;
-}
-
-/**
- * @brief Affiche les informations système périodiquement
- */
-static void monitor_task(void *pvParameters)
-{
-    while (1) {
-        // Afficher l'état de la mémoire
-        size_t free_heap = esp_get_free_heap_size();
-        size_t min_free_heap = esp_get_minimum_free_heap_size();
-
-        ESP_LOGI(TAG, "=== État du système ===");
-        ESP_LOGI(TAG, "Heap libre: %u bytes (min: %u bytes)", free_heap, min_free_heap);
-
-        // Statistiques du player
-        size_t bytes_downloaded = 0;
-        int buffer_fill = 0;
-        stream_player_get_stats(&bytes_downloaded, &buffer_fill);
-        ESP_LOGI(TAG, "Stream: %u KB téléchargés, buffer: %d%%",
-                 bytes_downloaded / 1024, buffer_fill);
-
-        // WiFi
-        ESP_LOGI(TAG, "WiFi: %s", wifi_helper_is_connected() ? "connecté" : "déconnecté");
-
-        vTaskDelay(pdMS_TO_TICKS(10000)); // Toutes les 10 secondes
-    }
 }
 
 void app_main(void)
@@ -123,74 +131,79 @@ void app_main(void)
 
     // 1. Initialiser NVS
     ESP_LOGI(TAG, "Initialisation NVS...");
-    ESP_ERROR_CHECK(init_nvs());
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "Effacement de la partition NVS");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 
-    // 2. Initialiser et connecter WiFi
+    // 2. Connecter WiFi
     ESP_LOGI(TAG, "Initialisation WiFi...");
-    ESP_ERROR_CHECK(wifi_helper_init());
-
-    ESP_LOGI(TAG, "Connexion au WiFi SSID: %s", WIFI_SSID);
-    esp_err_t ret = wifi_helper_connect(WIFI_SSID, WIFI_PASSWORD, WIFI_MAX_RETRY);
-    if (ret != ESP_OK) {
+    if (init_wifi() != ESP_OK) {
         ESP_LOGE(TAG, "Échec de connexion WiFi");
         return;
     }
-
     ESP_LOGI(TAG, "WiFi connecté avec succès");
 
     // 3. Enregistrer les décodeurs AAC et TS
-    ESP_LOGI(TAG, "Enregistrement du décodeur AAC...");
-    esp_audio_err_t audio_ret = esp_aac_dec_register();
-    if (audio_ret != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "Échec d'enregistrement du décodeur AAC: %d", audio_ret);
-        return;
-    }
+    ESP_LOGI(TAG, "Enregistrement des décodeurs audio...");
+    esp_aac_dec_register();
+    esp_ts_dec_register();
 
-    ESP_LOGI(TAG, "Enregistrement du décodeur TS...");
-    audio_ret = esp_ts_dec_register();
-    if (audio_ret != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "Échec d'enregistrement du décodeur TS: %d", audio_ret);
-        return;
-    }
-
-    // 4. Initialiser le driver audio
-    ESP_LOGI(TAG, "Initialisation du driver audio...");
-    ret = init_audio_driver();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Échec d'initialisation du driver audio");
-        return;
-    }
-
-    // 5. Démarrer le stream player
-    ESP_LOGI(TAG, "Démarrage du stream player...");
-    ESP_LOGI(TAG, "URL: %s", HLS_STREAM_URL);
-
-    // Buffer augmenté à 100KB grâce à la PSRAM
-    // Assez grand pour contenir ~2 segments complets sans risque de perte de données
-    const size_t buffer_size = 100 * 1024;
-    ESP_LOGI(TAG, "Buffer: %d KB (PSRAM activée)", buffer_size / 1024);
-
-    stream_player_config_t player_config = {
-        .stream_url = HLS_STREAM_URL,
-        .driver = s_driver,
-        .buffer_size = buffer_size,
+    // 4. Initialiser le driver audio MAX98357A
+    ESP_LOGI(TAG, "Initialisation du driver MAX98357A...");
+    drv_max98357a_config_t driver_config = {
+        .bclk_gpio = I2S_BCLK_PIN,
+        .ws_gpio = I2S_WS_PIN,
+        .dout_gpio = I2S_DOUT_PIN,
+        .sd_mode_gpio = (I2S_SD_MODE_PIN >= 0) ? I2S_SD_MODE_PIN : GPIO_NUM_NC,
+        .sample_rate = AUDIO_SAMPLE_RATE,
+        .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
+        .slot_mode = I2S_SLOT_MODE_STEREO,
+        .gain = DRV_MAX98357A_GAIN_3DB,
+        .dma_buf_count = 8,
+        .dma_buf_len = 512,
     };
 
-    ret = stream_player_start(&player_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Échec de démarrage du stream player");
-        drv_max98357a_del(s_driver);
-        return;
-    }
+    drv_max98357a_t *driver;
+    ESP_ERROR_CHECK(drv_max98357a_new(&driver_config, &driver));
+    ESP_ERROR_CHECK(drv_max98357a_enable(driver));
+    ESP_LOGI(TAG, "Driver MAX98357A initialisé (GPIO: BCLK=%d, WS=%d, DOUT=%d)",
+             I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN);
 
-    ESP_LOGI(TAG, "Stream player démarré avec succès");
+    // 5. Créer et démarrer le player HLS
+    ESP_LOGI(TAG, "Démarrage du stream HLS...");
+    ESP_LOGI(TAG, "URL: %s", HLS_STREAM_URL);
+
+    app_hls_player_config_t player_cfg;
+    app_hls_player_config_init(&player_cfg);
+    player_cfg.stream_url = HLS_STREAM_URL;
+    player_cfg.buffer_size = 100 * 1024;  // 100 KB
+    player_cfg.write_cb = audio_write_callback;
+    player_cfg.write_ctx = driver;  // Passer le driver comme contexte
+
+    app_hls_player_t *player;
+    ESP_ERROR_CHECK(app_hls_player_new(&player_cfg, &player));
+    ESP_ERROR_CHECK(app_hls_player_start(player));
+
+    ESP_LOGI(TAG, "Stream HLS démarré avec succès");
     ESP_LOGI(TAG, "===========================================");
 
-    // 6. Lancer la task de monitoring
-    xTaskCreate(monitor_task, "monitor", 3072, NULL, 2, NULL);
-
-    // Loop principale (reste en vie)
+    // 6. Boucle de monitoring
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        app_hls_player_stats_t stats;
+        app_hls_player_get_stats(player, &stats);
+
+        size_t free_heap = esp_get_free_heap_size();
+        size_t min_heap = esp_get_minimum_free_heap_size();
+
+        ESP_LOGI(TAG, "=== État ===");
+        ESP_LOGI(TAG, "Stream: %u KB téléchargés, buffer: %d%%",
+                 stats.bytes_downloaded / 1024, stats.buffer_fill_percent);
+        ESP_LOGI(TAG, "Heap: %u bytes libre (min: %u bytes)", free_heap, min_heap);
     }
 }
