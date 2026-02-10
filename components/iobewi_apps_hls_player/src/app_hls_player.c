@@ -63,6 +63,15 @@ struct app_hls_player_s {
 
 /**
  * @brief Helper pour lire header Location de manière sécurisée
+ *
+ * COMPAT NOTE: esp_http_client_get_header() ownership/signature peut varier selon IDF.
+ * Testé avec ESP-IDF v6.1-dev. Si build fail sur version antérieure, alternative :
+ * - Parser manuellement via HTTP_EVENT_ON_HEADER dans event handler
+ * - Stocker Location quand evt->header_key == "Location"
+ *
+ * @param client HTTP client handle
+ * @param buf Buffer destination (local, pas de pointeur direct)
+ * @param buf_size Taille du buffer
  * @return true si Location trouvé et copié, false sinon
  */
 static bool get_location_header(esp_http_client_handle_t client, char *buf, size_t buf_size)
@@ -85,14 +94,17 @@ static bool get_location_header(esp_http_client_handle_t client, char *buf, size
 
 /**
  * @brief Attente interruptible avec check notifications NOTIF_STOP
+ *
+ * xTaskNotifyWait travaille toujours sur la tâche courante, pas besoin de handle.
+ * Retourne false si NOTIF_STOP reçue, true si délai complet.
  */
-static bool interruptible_delay_ms(TaskHandle_t task, uint32_t ms)
+static bool interruptible_delay_ms(uint32_t ms)
 {
     const uint32_t step = 100;
     while (ms > 0) {
         uint32_t this_step = (ms > step) ? step : ms;
 
-        // Check notification sans bloquer
+        // Check notification sans bloquer (xTaskNotifyWait sur tâche courante)
         uint32_t notif = 0;
         if (xTaskNotifyWait(0, NOTIF_STOP, &notif, pdMS_TO_TICKS(this_step)) == pdTRUE) {
             if (notif & NOTIF_STOP) {
@@ -107,7 +119,7 @@ static bool interruptible_delay_ms(TaskHandle_t task, uint32_t ms)
 
 /**
  * @brief Callback HTTP pour recevoir les données
- * FIX: Drop-old strategy pour meilleure live-ness
+ * Drop-old strategy pour meilleure live-ness
  */
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
@@ -116,8 +128,12 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
             if (evt->data_len > 0 && handle->ring_buffer) {
+                bool sent_ok = false;
+
                 // Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
-                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
+                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) == pdTRUE) {
+                    sent_ok = true;
+                } else {
 #if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
                     // Stratégie drop-old : retirer un chunk ancien pour faire de la place
                     size_t drop_sz = 0;
@@ -127,19 +143,18 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                         handle->drop_old_count++;
 
                         // Retenter l'envoi
-                        if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
+                        if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) == pdTRUE) {
+                            sent_ok = true;
+                            if ((handle->drop_old_count % 100) == 0) {
+                                ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
+                            }
+                        } else {
                             // Toujours plein même après drop
                             handle->drop_count++;
                             if ((handle->drop_count % 100) == 0) {
                                 ESP_LOGW(TAG, "Ring buffer plein après drop-old (new x%u, old x%u)",
                                          (unsigned)handle->drop_count, (unsigned)handle->drop_old_count);
                             }
-                        } else {
-                            // Succès après drop-old
-                            if ((handle->drop_old_count % 100) == 0) {
-                                ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
-                            }
-                            goto stats_update;
                         }
                     } else {
                         // Rien à dropper (buffer vide ?)
@@ -152,14 +167,13 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                         ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)handle->drop_count);
                     }
 #endif
-                } else {
-stats_update:
-                    // Succès - Update stats
-                    if (handle->stats_mutex) {
-                        xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
-                        handle->bytes_downloaded += evt->data_len;
-                        xSemaphoreGive(handle->stats_mutex);
-                    }
+                }
+
+                // Update stats si envoi réussi
+                if (sent_ok && handle->stats_mutex) {
+                    xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
+                    handle->bytes_downloaded += evt->data_len;
+                    xSemaphoreGive(handle->stats_mutex);
                 }
             }
             break;
@@ -411,7 +425,6 @@ static char* download_m3u8(const char *url)
 static void hls_fetch_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
-    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
     ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
 
     int64_t last_sequence_number = -1;
@@ -448,19 +461,23 @@ static void hls_fetch_task(void *pvParameters)
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
             handle->is_downloading = false;
-            if (!interruptible_delay_ms(current_task, 5000)) {
+            if (!interruptible_delay_ms(5000)) {
                 break;  // Stop demandé pendant le délai
             }
             continue;
         }
 
+        // CRITICAL: memset avant parse pour garantir état propre si parse échoue
         lib_m3u8_parser_playlist_t playlist;
+        memset(&playlist, 0, sizeof(playlist));
+
         esp_err_t ret = lib_m3u8_parser_parse(m3u8_content, handle->stream_url, &playlist);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Échec de parsing M3U8");
             free(m3u8_content);
             handle->is_downloading = false;
-            if (!interruptible_delay_ms(current_task, 5000)) {
+            // NE PAS free playlist si parse a échoué (peut être incohérent)
+            if (!interruptible_delay_ms(5000)) {
                 break;  // Stop demandé pendant le délai
             }
             continue;
@@ -538,21 +555,23 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
                 handle->is_downloading = false;
-                if (!interruptible_delay_ms(current_task, 5000)) {
+                if (!interruptible_delay_ms(5000)) {
                     goto task_exit;  // Pas de free ici, déjà fait ligne ci-dessus
                 }
                 continue;
             }
 
             lib_m3u8_parser_free(&playlist);
+            // CRITICAL: memset après free pour garantir état propre avant parse
+            memset(&playlist, 0, sizeof(playlist));
+
             ret = lib_m3u8_parser_parse(m3u8_content, media_url, &playlist);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Échec de parsing de la media playlist");
                 free(m3u8_content);
                 handle->is_downloading = false;
-                // FIX: Attente interruptible de 5s
-                if (!interruptible_delay_ms(current_task, 5000)) {
-                    lib_m3u8_parser_free(&playlist);
+                // NE PAS free playlist si parse a échoué (peut être incohérent)
+                if (!interruptible_delay_ms(5000)) {
                     goto task_exit;
                 }
                 continue;
