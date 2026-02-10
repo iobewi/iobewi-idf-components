@@ -119,7 +119,14 @@ static bool interruptible_delay_ms(uint32_t ms)
 
 /**
  * @brief Check immédiat si NOTIF_STOP est présente (sans bloquer)
- * @return true si STOP demandé, false sinon
+ *
+ * ⚠️ WARNING: Cette fonction **CONSOMME** le bit NOTIF_STOP (xTaskNotifyWait l'efface).
+ * À n'utiliser que si l'appelant sort IMMÉDIATEMENT de la task (break/goto task_exit).
+ *
+ * Si appelé dans une fonction utilitaire ou suivi d'un continue, les checks suivants
+ * ne verront plus STOP → risque de tâche zombie.
+ *
+ * @return true si STOP demandé (et consommé), false sinon
  */
 static inline bool hls_should_stop_now(void)
 {
@@ -471,6 +478,7 @@ static void hls_fetch_task(void *pvParameters)
         // Check notification NOTIF_STOP sans bloquer
         if (hls_should_stop_now()) {
             ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
+            handle->is_downloading = false;
             break;
         }
 
@@ -489,6 +497,7 @@ static void hls_fetch_task(void *pvParameters)
         // Recheck stop après semaphore
         if (hls_should_stop_now()) {
             ESP_LOGI(TAG, "NOTIF_STOP reçue - arrêt fetch_task");
+            handle->is_downloading = false;  // Défensif (normalement déjà false)
             break;
         }
 
@@ -694,6 +703,7 @@ static void hls_fetch_task(void *pvParameters)
                          (long long)seg->sequence, (to_download_count - k), to_download_count);
             } else {
                 ESP_LOGE(TAG, "Échec téléchargement segment %lld", (long long)seg->sequence);
+                handle->is_downloading = false;
                 break;
             }
         }
