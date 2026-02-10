@@ -44,6 +44,17 @@ struct app_hls_player_s {
 };
 
 /**
+ * @brief Attente interruptible (check running toutes les 100ms)
+ */
+static void interruptible_delay_ms(app_hls_player_t *handle, uint32_t ms)
+{
+    const uint32_t step = 100;
+    for (uint32_t elapsed = 0; elapsed < ms && handle->running; elapsed += step) {
+        vTaskDelay(pdMS_TO_TICKS(step));
+    }
+}
+
+/**
  * @brief Callback HTTP pour recevoir les données
  * FIX #1: Accepte chunked ET non-chunked
  */
@@ -55,8 +66,8 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         case HTTP_EVENT_ON_DATA:
             // FIX #1: Suppression du check is_chunked - accepter toutes les réponses
             if (evt->data_len > 0 && handle->ring_buffer) {
-                // FIX: Timeout 10ms au lieu de 1000ms pour éviter de bloquer la stack HTTP
-                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, pdMS_TO_TICKS(10)) != pdTRUE) {
+                // FIX: Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
+                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
                     ESP_LOGW(TAG, "Ring buffer plein, données perdues");
                 } else {
                     // FIX #6: Protection concurrent access
@@ -136,6 +147,7 @@ static char* download_m3u8(const char *url)
     }
 
     int offset = 0;
+    bool truncated = false;
 
     esp_http_client_config_t config = {
         .url = url,
@@ -199,7 +211,8 @@ static char* download_m3u8(const char *url)
         // Si buffer plein et lecture continue, realloc
         if (offset >= (int)buffer_capacity - 1) {
             if (buffer_capacity >= M3U8_MAX_SIZE) {
-                ESP_LOGE(TAG, "M3U8 atteint limite max %u bytes, arrêt lecture", (unsigned)M3U8_MAX_SIZE);
+                ESP_LOGE(TAG, "M3U8 atteint limite max %u bytes, playlist tronquée (échec)", (unsigned)M3U8_MAX_SIZE);
+                truncated = true;
                 break;
             }
 
@@ -223,7 +236,8 @@ static char* download_m3u8(const char *url)
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    if (offset == 0) {
+    // FIX: Ne pas retourner une playlist tronquée (parsing échouera aléatoirement)
+    if (offset == 0 || truncated) {
         free(buffer);
         return NULL;
     }
@@ -270,10 +284,8 @@ static void hls_fetch_task(void *pvParameters)
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
             handle->is_downloading = false;
-            // FIX: Attente interruptible de 5s (check running toutes les 100ms)
-            for (int i = 0; i < 50 && handle->running; i++) {
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
+            // FIX: Attente interruptible de 5s
+            interruptible_delay_ms(handle, 5000);
             continue;
         }
 
@@ -283,10 +295,8 @@ static void hls_fetch_task(void *pvParameters)
             ESP_LOGE(TAG, "Échec de parsing M3U8");
             free(m3u8_content);
             handle->is_downloading = false;
-            // FIX: Attente interruptible de 5s (check running toutes les 100ms)
-            for (int i = 0; i < 50 && handle->running; i++) {
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
+            // FIX: Attente interruptible de 5s
+            interruptible_delay_ms(handle, 5000);
             continue;
         }
 
