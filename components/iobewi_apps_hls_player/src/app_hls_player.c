@@ -140,6 +140,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                     void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
                     if (drop) {
                         vRingbufferReturnItem(handle->ring_buffer, drop);
+                        (void)drop_sz;  // Utilisé par xRingbufferReceive, garde pour doc
                         handle->drop_old_count++;
 
                         // Retenter l'envoi
@@ -423,7 +424,13 @@ static char* download_m3u8(const char *url)
         return NULL;
     }
 
-    ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %u)", offset, (unsigned)buffer_capacity);
+    ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %zu)", offset, buffer_capacity);
+
+    // Log heap après pour tracker fragmentation
+    free_heap = esp_get_free_heap_size();
+    min_heap = esp_get_minimum_free_heap_size();
+    ESP_LOGI(TAG, "Heap après M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+
     return buffer;
 }
 
