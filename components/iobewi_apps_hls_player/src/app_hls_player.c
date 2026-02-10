@@ -157,8 +157,11 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                             }
                         }
                     } else {
-                        // Rien à dropper (buffer vide ?)
+                        // Rien à dropper (buffer vide ou condition race)
                         handle->drop_count++;
+                        if ((handle->drop_count % 100) == 0) {
+                            ESP_LOGW(TAG, "Ring buffer plein mais rien à drop (x%u)", (unsigned)handle->drop_count);
+                        }
                     }
 #else
                     // Stratégie drop-new (classic)
@@ -170,10 +173,15 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 }
 
                 // Update stats si envoi réussi
-                if (sent_ok && handle->stats_mutex) {
-                    xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
-                    handle->bytes_downloaded += evt->data_len;
-                    xSemaphoreGive(handle->stats_mutex);
+                if (sent_ok) {
+                    if (handle->stats_mutex) {
+                        xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
+                        handle->bytes_downloaded += evt->data_len;
+                        xSemaphoreGive(handle->stats_mutex);
+                    } else {
+                        // Best effort si pas de mutex (ne devrait jamais arriver)
+                        handle->bytes_downloaded += evt->data_len;
+                    }
                 }
             }
             break;
@@ -428,6 +436,7 @@ static void hls_fetch_task(void *pvParameters)
     ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
 
     int64_t last_sequence_number = -1;
+    bool playlist_valid = false;  // Défense : ne free que si playlist parsé avec succès
 
     while (true) {
         // Check notification NOTIF_STOP sans bloquer
@@ -483,6 +492,7 @@ static void hls_fetch_task(void *pvParameters)
             continue;
         }
 
+        playlist_valid = true;  // Parse réussi, playlist safe à free
         free(m3u8_content);
 
         // FIX #11: Stocker target_duration pour timeout refresh périodique
@@ -554,6 +564,7 @@ static void hls_fetch_task(void *pvParameters)
             if (m3u8_content == NULL) {
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
+                playlist_valid = false;
                 handle->is_downloading = false;
                 if (!interruptible_delay_ms(5000)) {
                     goto task_exit;  // Pas de free ici, déjà fait ligne ci-dessus
@@ -562,6 +573,7 @@ static void hls_fetch_task(void *pvParameters)
             }
 
             lib_m3u8_parser_free(&playlist);
+            playlist_valid = false;
             // CRITICAL: memset après free pour garantir état propre avant parse
             memset(&playlist, 0, sizeof(playlist));
 
@@ -577,6 +589,7 @@ static void hls_fetch_task(void *pvParameters)
                 continue;
             }
 
+            playlist_valid = true;  // Parse media réussi
             free(m3u8_content);
             lib_m3u8_parser_dump(&playlist);
         }
@@ -609,7 +622,10 @@ static void hls_fetch_task(void *pvParameters)
             // Check stop avant chaque segment
             if (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE && (notif & NOTIF_STOP)) {
                 ESP_LOGI(TAG, "NOTIF_STOP reçue pendant download - arrêt fetch_task");
-                lib_m3u8_parser_free(&playlist);
+                if (playlist_valid) {
+                    lib_m3u8_parser_free(&playlist);
+                    playlist_valid = false;
+                }
                 goto task_exit;
             }
 
@@ -662,6 +678,7 @@ static void hls_fetch_task(void *pvParameters)
 
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
                 lib_m3u8_parser_free(&playlist);
+                playlist_valid = false;
                 handle->is_downloading = false;
                 xSemaphoreGive(handle->download_semaphore);  // Trigger immédiat
                 continue;
@@ -671,6 +688,7 @@ static void hls_fetch_task(void *pvParameters)
         }
 
         lib_m3u8_parser_free(&playlist);
+        playlist_valid = false;
         handle->is_downloading = false;
     }
 
@@ -691,7 +709,6 @@ task_exit:
 static void audio_play_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
-    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
     ESP_LOGI(TAG, "Démarrage de la task de lecture audio");
 
     // Créer le décodeur TS
