@@ -44,13 +44,15 @@ struct app_hls_player_s {
 };
 
 /**
- * @brief Attente interruptible (check running toutes les 100ms)
+ * @brief Attente interruptible (check running toutes les 100ms max)
  */
 static void interruptible_delay_ms(app_hls_player_t *handle, uint32_t ms)
 {
     const uint32_t step = 100;
-    for (uint32_t elapsed = 0; elapsed < ms && handle->running; elapsed += step) {
-        vTaskDelay(pdMS_TO_TICKS(step));
+    while (ms > 0 && handle->running) {
+        uint32_t this_step = (ms > step) ? step : ms;
+        vTaskDelay(pdMS_TO_TICKS(this_step));
+        ms -= this_step;
     }
 }
 
@@ -224,6 +226,7 @@ static char* download_m3u8(const char *url)
             char *new_buffer = realloc(buffer, new_capacity);
             if (new_buffer == NULL) {
                 ESP_LOGE(TAG, "Échec realloc progressif à %u bytes", (unsigned)new_capacity);
+                truncated = true;  // FIX: Forcer NULL si realloc échoue
                 break;
             }
             buffer = new_buffer;
@@ -372,10 +375,8 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
                 handle->is_downloading = false;
-                // FIX: Attente interruptible de 5s (check running toutes les 100ms)
-                for (int i = 0; i < 50 && handle->running; i++) {
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
+                // FIX: Attente interruptible de 5s
+                interruptible_delay_ms(handle, 5000);
                 continue;
             }
 
@@ -385,10 +386,8 @@ static void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de parsing de la media playlist");
                 free(m3u8_content);
                 handle->is_downloading = false;
-                // FIX: Attente interruptible de 5s (check running toutes les 100ms)
-                for (int i = 0; i < 50 && handle->running; i++) {
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
+                // FIX: Attente interruptible de 5s
+                interruptible_delay_ms(handle, 5000);
                 continue;
             }
 
@@ -557,6 +556,8 @@ static void audio_play_task(void *pvParameters)
         // FIX #14: Gestion DISCONTINUITY - reset complet décodeur + flush buffers
         if (handle->needs_decoder_reset) {
             ESP_LOGW(TAG, "Reset décodeur suite DISCONTINUITY");
+            // FIX: Clear flag immédiatement pour éviter double reset si DISC arrive pendant reset
+            handle->needs_decoder_reset = false;
 
             // Vider le ring buffer pour éviter données corrompues
             size_t item_size = 0;
@@ -585,7 +586,6 @@ static void audio_play_task(void *pvParameters)
             }
 
             ESP_LOGI(TAG, "Décodeur recréé avec succès");
-            handle->needs_decoder_reset = false;
         }
 
         if (was_downloading && !handle->is_downloading) {
