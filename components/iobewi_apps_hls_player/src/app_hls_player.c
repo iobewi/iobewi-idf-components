@@ -63,6 +63,7 @@ static void interruptible_delay_ms(app_hls_player_t *handle, uint32_t ms)
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     app_hls_player_t *handle = (app_hls_player_t *)evt->user_data;
+    static uint32_t drop_count = 0;  // FIX: Rate limit pour éviter spam log
 
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
@@ -70,7 +71,10 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             if (evt->data_len > 0 && handle->ring_buffer) {
                 // FIX: Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
                 if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
-                    ESP_LOGW(TAG, "Ring buffer plein, données perdues");
+                    // FIX: Rate limit log 1/100 pour éviter spam en congestion
+                    if ((++drop_count % 100) == 0) {
+                        ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)drop_count);
+                    }
                 } else {
                     // FIX #6: Protection concurrent access
                     if (handle->stats_mutex) {
@@ -235,7 +239,16 @@ static char* download_m3u8(const char *url)
         }
     }
 
+    // FIX: Sécuriser offset avant write (défense contre évolution future du while)
+    if (offset < 0) {
+        offset = 0;
+    }
+    if ((size_t)offset >= buffer_capacity) {
+        truncated = true;
+        offset = (int)buffer_capacity - 1;
+    }
     buffer[offset] = '\0';
+
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
