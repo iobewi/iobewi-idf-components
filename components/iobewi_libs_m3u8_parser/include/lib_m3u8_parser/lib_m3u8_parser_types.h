@@ -17,13 +17,39 @@ extern "C" {
 
 /**
  * @brief Nombre maximum de segments/variants supportés dans une playlist
+ *
+ * P2: Configurable via Kconfig (CONFIG_M3U8_MAX_ITEMS)
+ * Par défaut : 16 (audio live), jusqu'à 64 (vidéo/VOD)
  */
-#define LIB_M3U8_PARSER_MAX_SEGMENTS 32
+#ifdef CONFIG_M3U8_MAX_ITEMS
+#define LIB_M3U8_PARSER_MAX_SEGMENTS CONFIG_M3U8_MAX_ITEMS
+#else
+#define LIB_M3U8_PARSER_MAX_SEGMENTS 16  // Défaut si Kconfig non disponible
+#endif
 
 /**
  * @brief Longueur maximale d'une URL de segment
+ *
+ * P2: Configurable via Kconfig (CONFIG_M3U8_MAX_URL_LENGTH)
+ * Par défaut : 160 (URLs CDN courtes), jusqu'à 512 (URLs très longues)
  */
-#define LIB_M3U8_PARSER_MAX_URL_LEN 256
+#ifdef CONFIG_M3U8_MAX_URL_LENGTH
+#define LIB_M3U8_PARSER_MAX_URL_LEN CONFIG_M3U8_MAX_URL_LENGTH
+#else
+#define LIB_M3U8_PARSER_MAX_URL_LEN 160  // Défaut si Kconfig non disponible
+#endif
+
+/**
+ * @brief Longueur maximale d'une chaîne de codec
+ *
+ * P2: Configurable via Kconfig (CONFIG_M3U8_MAX_CODEC_LENGTH)
+ * Par défaut : 32 (audio), jusqu'à 128 (vidéo+audio complexe)
+ */
+#ifdef CONFIG_M3U8_MAX_CODEC_LENGTH
+#define LIB_M3U8_PARSER_MAX_CODEC_LEN CONFIG_M3U8_MAX_CODEC_LENGTH
+#else
+#define LIB_M3U8_PARSER_MAX_CODEC_LEN 32  // Défaut si Kconfig non disponible
+#endif
 
 /**
  * @brief Flags pour segment M3U8
@@ -52,11 +78,11 @@ typedef struct {
  * - bandwidth : int64_t (bps) → uint32_t (kbps), max 4.3 Tbps, largement suffisant
  */
 typedef struct {
-    char url[LIB_M3U8_PARSER_MAX_URL_LEN];  /**< URL de la media playlist */
-    uint32_t bandwidth_kbps;                 /**< Bande passante en kilobits/sec (0-4.3M kbps) */
-    char codecs[64];                         /**< Codecs (ex: "mp4a.40.2") */
-    int width;                               /**< Largeur vidéo (0 si audio only) */
-    int height;                              /**< Hauteur vidéo (0 si audio only) */
+    char url[LIB_M3U8_PARSER_MAX_URL_LEN];    /**< URL de la media playlist */
+    uint32_t bandwidth_kbps;                   /**< Bande passante en kilobits/sec (0-4.3M kbps) */
+    char codecs[LIB_M3U8_PARSER_MAX_CODEC_LEN]; /**< Codecs (ex: "mp4a.40.2"), P2: configurable */
+    int width;                                 /**< Largeur vidéo (0 si audio only) */
+    int height;                                /**< Hauteur vidéo (0 si audio only) */
 } lib_m3u8_parser_variant_t;
 
 /**
