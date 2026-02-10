@@ -41,6 +41,7 @@ struct app_hls_player_s {
     void *write_ctx;                        /**< Contexte utilisateur pour callback */
     int target_duration;                    /**< FIX #11: Target duration pour timeout refresh */
     volatile bool needs_decoder_reset;      /**< FIX #14: Flag reset décodeur sur DISCONTINUITY */
+    uint32_t drop_count;                    /**< Compteur pertes ring buffer (rate limit log) */
 };
 
 /**
@@ -63,7 +64,6 @@ static void interruptible_delay_ms(app_hls_player_t *handle, uint32_t ms)
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     app_hls_player_t *handle = (app_hls_player_t *)evt->user_data;
-    static uint32_t drop_count = 0;  // FIX: Rate limit pour éviter spam log
 
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
@@ -71,9 +71,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
             if (evt->data_len > 0 && handle->ring_buffer) {
                 // FIX: Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
                 if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) != pdTRUE) {
-                    // FIX: Rate limit log 1/100 pour éviter spam en congestion
-                    if ((++drop_count % 100) == 0) {
-                        ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)drop_count);
+                    // FIX: Rate limit log 1/100 (compteur dans handle pour multi-instance)
+                    if ((++handle->drop_count % 100) == 0) {
+                        ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)handle->drop_count);
                     }
                 } else {
                     // FIX #6: Protection concurrent access
@@ -118,6 +118,12 @@ static esp_err_t download_segment(app_hls_player_t *handle, const char *url)
         int status = esp_http_client_get_status_code(client);
         int length = esp_http_client_get_content_length(client);
         ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
+
+        // FIX: Traiter status != 200/206 comme erreur (évite dérive silencieuse)
+        if (status != 200 && status != 206) {
+            ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
+            err = ESP_FAIL;
+        }
     } else {
         ESP_LOGE(TAG, "Erreur HTTP: %s", esp_err_to_name(err));
     }
@@ -206,13 +212,18 @@ static char* download_m3u8(const char *url)
     }
 
     // Lecture avec realloc progressif si nécessaire
-    while (offset < (int)buffer_capacity - 1) {
+    // FIX: Compteur itérations pour éviter boucle infinie (timeout global)
+    int max_iterations = 1000;  // Protection contre read lent/bloqué
+    int iteration_count = 0;
+
+    while (offset < (int)buffer_capacity - 1 && iteration_count < max_iterations) {
         int to_read = (buffer_capacity - 1) - offset;
         int read_len = esp_http_client_read(client, buffer + offset, to_read);
         if (read_len <= 0) {
             break;
         }
         offset += read_len;
+        iteration_count++;
 
         // Si buffer plein et lecture continue, realloc
         if (offset >= (int)buffer_capacity - 1) {
@@ -867,6 +878,7 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     handle->is_downloading = false;
     handle->needs_decoder_reset = false;
     handle->target_duration = 0;  // Sera mis à jour par premier parsing
+    handle->drop_count = 0;  // Reset compteur pertes ring buffer
     handle->running = true;
 
     // Signal initial pour déclencher le premier téléchargement
@@ -885,6 +897,7 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
         ESP_LOGE(TAG, "Échec de création de la task de lecture");
         handle->running = false;
         vTaskDelete(handle->fetch_task);
+        handle->fetch_task = NULL;  // FIX: Cleanup pour stop/del idempotent
         return ESP_FAIL;
     }
 

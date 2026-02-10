@@ -4,21 +4,21 @@
  *
  * Ce composant fournit une orchestration complète pour le streaming HLS :
  * - Téléchargement et parsing de playlists M3U8 (master et media)
- * - Téléchargement des segments audio
- * - Décodage AAC/MPEG-TS vers PCM
- * - Buffering intelligent avec resynchronisation automatique
+ * - Téléchargement des segments
+ * - Décodage MPEG-TS (audio AAC) vers PCM
+ * - Buffering avec resynchronisation MPEG-TS
  * - Abstraction de la sortie audio via callback
  *
  * Architecture :
  * - 2 tâches concurrentes (fetch et play)
- * - Ring buffer partagé avec sémaphore de contrôle
+ * - Ring buffer partagé et mécanisme de contrôle via sémaphore
  * - Gestion automatique de la synchronisation et des erreurs
  *
  * Limitations actuelles :
- * - Codec supporté : AAC uniquement (pas MP3)
  * - Container supporté : MPEG-TS uniquement
  * - Chiffrement : Non supporté (pas AES-128)
- * - Master playlists : Première variante uniquement
+ * - Codecs : dépend du décodeur TS sous-jacent (usage typique : AAC-LC)
+ * - Master playlists : sélection déterministe (midfi/hifi/lofi ou fallback bandwidth)
  */
 
 #ifndef APP_HLS_PLAYER_H
@@ -86,7 +86,8 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle);
  * Le ring buffer est vidé mais les ressources du handle sont préservées.
  * Le player peut être redémarré avec app_hls_player_start().
  *
- * Note : Cette fonction attend jusqu'à 2 secondes pour la terminaison des tâches.
+ * Note : Cette fonction attend jusqu'à 5 secondes par tâche pour la terminaison
+ *        (tâches fetch et play).
  *
  * @param[in] handle Handle du player
  *
