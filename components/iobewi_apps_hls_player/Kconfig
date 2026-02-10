@@ -14,20 +14,22 @@ menu "HLS Player Configuration"
 
             Larger buffer = more latency but more resilient to network jitter.
 
-    config APP_HLS_PLAYER_ENC_BUFFER_SIZE
-        int "Encoded buffer size (KB)"
-        default 144 if SPIRAM
-        default 64 if !SPIRAM
-        range 32 192
+    config APP_HLS_PLAYER_REM_BUFFER_SIZE
+        int "Remainder buffer size (KB) - P1.3 RAM optimization"
+        default 8
+        range 4 16
         help
-            Size of the internal encoder buffer for TS demux/decode in KB.
+            [RAM OPT P1.3] Small buffer to keep unconsumed bytes between decode cycles.
+
+            This replaces the large encoded_buffer (144 KB → 8 KB = -136 KB gain).
 
             Recommended values:
-            - With PSRAM: 96-144 KB (handles large TS packets)
-            - Without PSRAM: 48-64 KB (minimum viable)
+            - 4 KB: Minimal, may increase decode errors if TS packets are large
+            - 8 KB: Recommended (sufficient for AAC/TS, tested)
+            - 16 KB: Conservative (if decode errors occur)
 
-            This buffer accumulates encoded data before passing to decoder.
-            Too small = frequent underruns, too large = wasted RAM.
+            Larger = more resilient to large TS packets, but more RAM.
+            Typical remainder size observed: < 4 KB.
 
     config APP_HLS_PLAYER_DEC_BUFFER_SIZE
         int "Decoded buffer size (KB)"

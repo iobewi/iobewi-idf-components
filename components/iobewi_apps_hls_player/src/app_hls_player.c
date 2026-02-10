@@ -32,8 +32,8 @@ static const char *TAG = "app_hls_player";
 #ifndef CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE
     #define CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE 128
 #endif
-#ifndef CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE
-    #define CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE 144
+#ifndef CONFIG_APP_HLS_PLAYER_REM_BUFFER_SIZE
+    #define CONFIG_APP_HLS_PLAYER_REM_BUFFER_SIZE 8
 #endif
 #ifndef CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE
     #define CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE 16
@@ -809,20 +809,21 @@ static void audio_play_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Décodeur TS créé avec succès");
 
-    // Tailles de buffers depuis Kconfig
-    const size_t ENC_BUF_SIZE = CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE * 1024;
+    // [RAM OPT P1.3] Tailles de buffers depuis Kconfig
+    // Remainder buffer : 8 KB (vs 144 KB encoded_buffer = -136 KB gain !)
+    const size_t REM_BUF_SIZE = CONFIG_APP_HLS_PLAYER_REM_BUFFER_SIZE * 1024;
     const size_t DEC_BUF_SIZE = CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE * 1024;
 
-    ESP_LOGI(TAG, "Buffers: enc=%zu KB, dec=%zu KB",
-             CONFIG_APP_HLS_PLAYER_ENC_BUFFER_SIZE, CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE);
+    ESP_LOGI(TAG, "[RAM OPT] Buffers: remainder=%zu KB, dec=%zu KB (vs 144 KB enc before)",
+             CONFIG_APP_HLS_PLAYER_REM_BUFFER_SIZE, CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE);
 
-    uint8_t *encoded_buffer = malloc(ENC_BUF_SIZE);
+    uint8_t *remainder_buf = malloc(REM_BUF_SIZE);
     int16_t *decoded_buffer = malloc(DEC_BUF_SIZE);
 
-    if (encoded_buffer == NULL || decoded_buffer == NULL) {
+    if (remainder_buf == NULL || decoded_buffer == NULL) {
         ESP_LOGE(TAG, "Échec d'allocation des buffers de décodage");
         esp_audio_simple_dec_close(dec_handle);
-        free(encoded_buffer);
+        free(remainder_buf);
         free(decoded_buffer);
         if (handle->play_done) {
             xSemaphoreGive(handle->play_done);
@@ -831,7 +832,8 @@ static void audio_play_task(void *pvParameters)
         return;
     }
 
-    size_t buffered_size = 0;
+    size_t remainder_size = 0;  // Bytes non consommés du cycle précédent
+    size_t remainder_max = 0;   // Max observé (pour tuning)
 
     ESP_LOGI(TAG, "Démarrage de la lecture audio...");
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -859,8 +861,8 @@ static void audio_play_task(void *pvParameters)
                     vRingbufferReturnItem(handle->ring_buffer, item);
                 }
 
-                // Reset buffer encodé local
-                buffered_size = 0;
+                // Reset remainder buffer
+                remainder_size = 0;
 
                 // Recréer le décodeur pour reset état interne (PES, PAT/PMT, timestamps)
                 ESP_LOGI(TAG, "Fermeture décodeur...");
@@ -871,7 +873,7 @@ static void audio_play_task(void *pvParameters)
                 if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
                     ESP_LOGE(TAG, "Échec réouverture décodeur après DISCONTINUITY: %d", dec_ret);
                     // Arrêt fatal, la tâche ne peut pas continuer
-                    free(encoded_buffer);
+                    free(remainder_buf);
                     free(decoded_buffer);
                     if (handle->play_done) {
                         xSemaphoreGive(handle->play_done);
@@ -903,37 +905,63 @@ static void audio_play_task(void *pvParameters)
             download_signaled = false;
         }
 
-        // Lire les données encodées
-        if (buffered_size < ENC_BUF_SIZE / 4) {
-            size_t item_size = 0;
-            uint8_t *item = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &item_size, pdMS_TO_TICKS(100));
+        // [RAM OPT P1.3] Recevoir chunk du ringbuffer
+        size_t chunk_size = 0;
+        uint8_t *chunk = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &chunk_size, pdMS_TO_TICKS(100));
 
-            if (item != NULL) {
-                size_t space_left = ENC_BUF_SIZE - buffered_size;
-                size_t to_copy = (item_size < space_left) ? item_size : space_left;
-
-                if (to_copy < item_size) {
-                    ESP_LOGW(TAG, "PERTE: %zu bytes perdus (buffer plein: %zu/%d)",
-                             item_size - to_copy, buffered_size, ENC_BUF_SIZE);
-                }
-
-                memcpy(encoded_buffer + buffered_size, item, to_copy);
-                buffered_size += to_copy;
-
-                vRingbufferReturnItem(handle->ring_buffer, item);
+        if (chunk == NULL) {
+            // Pas de données disponibles
+            if (remainder_size == 0) {
+                // Rien à décoder, attendre
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
             }
+            // On a du remainder, on peut essayer de décoder quand même
         }
 
-        if (buffered_size == 0) {
-            ESP_LOGW(TAG, "Buffer vide, attente...");
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+        // [RAM OPT P1.3] Préparer données pour décodage
+        uint8_t *decode_ptr;
+        size_t decode_len;
+
+        if (remainder_size > 0 && chunk != NULL) {
+            // Cas : remainder + nouveau chunk
+            // On doit assembler temporairement (éviter copie massive)
+
+            // Vérifier overflow
+            if (remainder_size + chunk_size > REM_BUF_SIZE * 2) {
+                ESP_LOGW(TAG, "[P1.3] Assembly overflow: remainder=%zu + chunk=%zu > limit, truncate chunk",
+                         remainder_size, chunk_size);
+                chunk_size = (REM_BUF_SIZE * 2) - remainder_size;
+            }
+
+            // Copier chunk après remainder (in-place dans remainder_buf si assez de place)
+            if (remainder_size + chunk_size <= REM_BUF_SIZE) {
+                memcpy(remainder_buf + remainder_size, chunk, chunk_size);
+                decode_ptr = remainder_buf;
+                decode_len = remainder_size + chunk_size;
+            } else {
+                // Chunk trop gros, décoder en 2 passes ou buffer temporaire
+                // Pour simplifier : décoder remainder seul d'abord
+                decode_ptr = remainder_buf;
+                decode_len = remainder_size;
+                // On gardera chunk pour le prochain cycle
+                vRingbufferReturnItem(handle->ring_buffer, chunk);
+                chunk = NULL;
+            }
+        } else if (chunk != NULL) {
+            // Cas : pas de remainder, juste le chunk
+            decode_ptr = chunk;
+            decode_len = chunk_size;
+        } else {
+            // Cas : remainder seul (pas de nouveau chunk)
+            decode_ptr = remainder_buf;
+            decode_len = remainder_size;
         }
 
         // Décoder
         esp_audio_simple_dec_raw_t raw = {
-            .buffer = encoded_buffer,
-            .len = buffered_size,
+            .buffer = decode_ptr,
+            .len = decode_len,
             .eos = false,
             .consumed = 0,
         };
@@ -947,15 +975,46 @@ static void audio_play_task(void *pvParameters)
         dec_ret = esp_audio_simple_dec_process(dec_handle, &raw, &out_frame);
 
         if (decode_count++ < 20 || dec_ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu",
-                     decode_count, dec_ret, buffered_size, raw.consumed, out_frame.decoded_size);
+            ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu, remainder=%zu",
+                     decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size, remainder_size);
         }
 
-        if (raw.consumed > 0) {
-            if (raw.consumed < buffered_size) {
-                memmove(encoded_buffer, encoded_buffer + raw.consumed, buffered_size - raw.consumed);
+        // [RAM OPT P1.3] Gérer remainder (bytes non consommés)
+        size_t unconsumed = (decode_len > raw.consumed) ? (decode_len - raw.consumed) : 0;
+
+        if (unconsumed > 0) {
+            if (unconsumed > REM_BUF_SIZE) {
+                ESP_LOGE(TAG, "[P1.3] Remainder overflow: %zu > %zu, truncate !",
+                         unconsumed, REM_BUF_SIZE);
+                unconsumed = REM_BUF_SIZE;
             }
-            buffered_size -= raw.consumed;
+
+            // Copier unconsumed bytes dans remainder_buf
+            if (decode_ptr != remainder_buf) {
+                // Source externe (chunk), copier vers remainder
+                memcpy(remainder_buf, decode_ptr + raw.consumed, unconsumed);
+            } else if (raw.consumed > 0) {
+                // Source = remainder_buf, décaler si nécessaire
+                memmove(remainder_buf, remainder_buf + raw.consumed, unconsumed);
+            }
+
+            remainder_size = unconsumed;
+
+            // Track max pour tuning
+            if (remainder_size > remainder_max) {
+                remainder_max = remainder_size;
+                if (remainder_max > REM_BUF_SIZE * 0.75) {
+                    ESP_LOGW(TAG, "[P1.3] Remainder high: %zu / %zu (75%% capacity)",
+                             remainder_max, REM_BUF_SIZE);
+                }
+            }
+        } else {
+            remainder_size = 0;
+        }
+
+        // Libérer chunk si utilisé
+        if (chunk != NULL) {
+            vRingbufferReturnItem(handle->ring_buffer, chunk);
         }
 
         if (dec_ret == ESP_AUDIO_ERR_OK && out_frame.decoded_size > 0) {
@@ -976,43 +1035,27 @@ static void audio_play_task(void *pvParameters)
             }
 
             if (decode_count % 100 == 0) {
-                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, buf=%zu)", bytes_written, decode_count, buffered_size);
+                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, rem=%zu)", bytes_written, decode_count, remainder_size);
             }
         } else if (dec_ret != ESP_AUDIO_ERR_OK) {
-            // FIX #8: Resync TS uniquement (pas AAC car on décode du TS)
+            // [P1.3] Erreur de décodage : drop remainder et recommencer avec données fraîches
             if (++error_count % 50 == 0) {
                 ESP_LOGW(TAG, "Erreur décodage: ret=%d, consumed=%lu, decoded=%lu (count=%d)",
                          dec_ret, raw.consumed, out_frame.decoded_size, error_count);
             }
 
-            // Resynchronisation TS (0x47 à intervalle 188)
-            bool found_sync = false;
-            for (size_t i = 1; i < buffered_size - 188; i++) {
-                if (encoded_buffer[i] == 0x47 && encoded_buffer[i + 188] == 0x47) {
-                    memmove(encoded_buffer, encoded_buffer + i, buffered_size - i);
-                    buffered_size -= i;
-                    found_sync = true;
-                    if (error_count % 50 == 0) {
-                        ESP_LOGI(TAG, "Resync TS trouvé à offset %zu", i);
-                    }
-                    break;
-                }
-            }
-
-            if (!found_sync) {
-                if (buffered_size > 2048) {
-                    buffered_size -= 2048;
-                    memmove(encoded_buffer, encoded_buffer + 2048, buffered_size);
-                } else {
-                    buffered_size = 0;
-                }
+            // Stratégie simple : réinitialiser le remainder buffer
+            // Les prochains chunks du ringbuffer fourniront des données synchronisées
+            if (remainder_size > 0) {
+                ESP_LOGW(TAG, "Drop remainder buffer (%zu bytes) après erreur décodage", remainder_size);
+                remainder_size = 0;
             }
         }
     }
 
     // Cleanup
     esp_audio_simple_dec_close(dec_handle);
-    free(encoded_buffer);
+    free(remainder_buf);
     free(decoded_buffer);
 
     ESP_LOGI(TAG, "Arrêt de la task de lecture audio");
