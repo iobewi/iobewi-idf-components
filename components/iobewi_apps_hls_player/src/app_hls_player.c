@@ -121,7 +121,15 @@ static esp_err_t download_segment(app_hls_player_t *handle, const char *url)
 
         // FIX: Traiter status != 200/206 comme erreur (évite dérive silencieuse)
         if (status != 200 && status != 206) {
-            ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
+            // FIX: Logger Location si redirection (debug terrain)
+            if (status >= 300 && status < 400) {
+                char *location = NULL;
+                esp_http_client_get_header(client, "Location", &location);
+                ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status,
+                         location ? location : "unknown");
+            } else {
+                ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
+            }
             err = ESP_FAIL;
         }
     } else {
@@ -214,6 +222,7 @@ static char* download_m3u8(const char *url)
     // Lecture avec realloc progressif si nécessaire
     // FIX: zero_read_streak pour gérer read_len==0 temporaire (certaines stacks/proxy)
     int zero_read_streak = 0;
+    bool expect_length = (content_length > 0);  // FIX: Détecter EOF normal vs incomplet
 
     while (offset < (int)buffer_capacity - 1) {
         int to_read = (buffer_capacity - 1) - offset;
@@ -226,6 +235,12 @@ static char* download_m3u8(const char *url)
             // FIX: read==0 peut être temporaire (pas forcément EOF)
             if (++zero_read_streak > 5) {  // ~5 tentatives
                 ESP_LOGW(TAG, "M3U8: read_len==0 persistant (%d tentatives), fin lecture", zero_read_streak);
+                // FIX: Si content_length connu et offset < attendu → potentiellement incomplet
+                if (!expect_length || offset < content_length) {
+                    ESP_LOGW(TAG, "M3U8: playlist potentiellement incomplète (attendu: %d, reçu: %d)",
+                             content_length, offset);
+                    truncated = true;
+                }
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(20));  // Petit délai avant retry
