@@ -26,21 +26,34 @@ extern "C" {
 #define LIB_M3U8_PARSER_MAX_URL_LEN 256
 
 /**
+ * @brief Flags pour segment M3U8
+ */
+#define LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY (1 << 0)  /**< Discontinuité avant ce segment */
+
+/**
  * @brief Structure représentant un segment M3U8
+ *
+ * OPTIMISATION RAM (P1): Types compacts
+ * - duration : float → uint16_t (millisecondes, max 65.5s, suffisant pour HLS)
+ * - sequence : int64_t → uint32_t (4.3 milliards, plusieurs années de streaming)
+ * - discontinuity : bool → flag dans uint8_t (extensible pour futurs flags)
  */
 typedef struct {
     char url[LIB_M3U8_PARSER_MAX_URL_LEN];  /**< URL du segment */
-    float duration;                          /**< Durée du segment en secondes */
-    int64_t sequence;                        /**< Numéro de séquence (media_sequence + index) */
-    bool discontinuity;                      /**< true si discontinuité avant ce segment */
+    uint16_t duration_ms;                    /**< Durée du segment en millisecondes (0-65535 ms) */
+    uint32_t sequence;                       /**< Numéro de séquence (media_sequence + index) */
+    uint8_t flags;                           /**< Flags : DISCONTINUITY, etc. */
 } lib_m3u8_parser_segment_t;
 
 /**
  * @brief Structure représentant un variant stream (master playlist)
+ *
+ * OPTIMISATION RAM (P1): bandwidth compact
+ * - bandwidth : int64_t (bps) → uint32_t (kbps), max 4.3 Tbps, largement suffisant
  */
 typedef struct {
     char url[LIB_M3U8_PARSER_MAX_URL_LEN];  /**< URL de la media playlist */
-    int64_t bandwidth;                       /**< Bande passante en bits/sec */
+    uint32_t bandwidth_kbps;                 /**< Bande passante en kilobits/sec (0-4.3M kbps) */
     char codecs[64];                         /**< Codecs (ex: "mp4a.40.2") */
     int width;                               /**< Largeur vidéo (0 si audio only) */
     int height;                              /**< Hauteur vidéo (0 si audio only) */
@@ -72,7 +85,7 @@ typedef struct {
     bool is_live;                 /**< true si playlist live */
     int target_duration;          /**< Durée cible des segments en secondes */
     bool is_master_playlist;      /**< true si master playlist (variants), false si media (segments) */
-    int64_t media_sequence;       /**< Premier numéro de séquence (live, media playlist uniquement) */
+    uint32_t media_sequence;      /**< Premier numéro de séquence (P1: uint32_t suffit, 4.3 milliards) */
     int version;                  /**< Version HLS (EXT-X-VERSION) */
 } lib_m3u8_parser_playlist_t;
 

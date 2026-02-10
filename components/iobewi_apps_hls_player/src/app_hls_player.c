@@ -550,7 +550,7 @@ static void hls_fetch_task(void *pvParameters)
 
             // Politique: midfi > hifi > lofi (par nom OU par bandwidth)
             int idx_selected = -1;
-            int64_t best_bandwidth = 0;
+            uint32_t best_bandwidth = 0;  // P1: bandwidth en kbps (uint32_t)
 
             // D'abord chercher par nom (France Inter)
             int idx_hifi = -1, idx_midfi = -1, idx_lofi = -1;
@@ -579,11 +579,11 @@ static void hls_fetch_task(void *pvParameters)
                 // Fallback: sélectionner par bandwidth (milieu de gamme)
                 // Chercher bandwidth entre 96kbps et 160kbps si possible
                 for (int i = 0; i < playlist.variant_count; i++) {
-                    int64_t bw = playlist.variants[i].bandwidth;
-                    if (bw >= 96000 && bw <= 160000) {
-                        if (idx_selected < 0 || bw > best_bandwidth) {
+                    uint32_t bw_kbps = playlist.variants[i].bandwidth_kbps;  // P1: bandwidth en kbps
+                    if (bw_kbps >= 96 && bw_kbps <= 160) {
+                        if (idx_selected < 0 || bw_kbps > best_bandwidth) {
                             idx_selected = i;
-                            best_bandwidth = bw;
+                            best_bandwidth = bw_kbps;
                         }
                     }
                 }
@@ -593,8 +593,8 @@ static void hls_fetch_task(void *pvParameters)
                     idx_selected = 0;
                 }
 
-                ESP_LOGI(TAG, "Variant %d sélectionné (bandwidth=%lld bps)",
-                         idx_selected, (long long)playlist.variants[idx_selected].bandwidth);
+                ESP_LOGI(TAG, "Variant %d sélectionné (bandwidth=%u kbps)",
+                         idx_selected, playlist.variants[idx_selected].bandwidth_kbps);
             }
 
             char media_url[LIB_M3U8_PARSER_MAX_URL_LEN];
@@ -682,12 +682,12 @@ static void hls_fetch_task(void *pvParameters)
             int idx = to_download[k];
             const lib_m3u8_parser_segment_t *seg = &playlist.segments[idx];
 
-            ESP_LOGI(TAG, "Téléchargement segment %lld (%d/%d)%s",
-                     (long long)seg->sequence, (to_download_count - k), to_download_count,
-                     seg->discontinuity ? " [DISCONTINUITY]" : "");
+            ESP_LOGI(TAG, "Téléchargement segment %u (%d/%d)%s",
+                     seg->sequence, (to_download_count - k), to_download_count,
+                     (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISCONTINUITY]" : "");
 
-            // Signaler DISCONTINUITY pour reset décodeur via task notification
-            if (seg->discontinuity && handle->play_task) {
+            // Signaler DISCONTINUITY pour reset décodeur via task notification (P1: check flag)
+            if ((seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) && handle->play_task) {
                 ESP_LOGW(TAG, "DISCONTINUITY détectée → notification NOTIF_RESET vers play_task");
                 xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }

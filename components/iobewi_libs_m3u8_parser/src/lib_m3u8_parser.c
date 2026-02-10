@@ -247,7 +247,7 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
     // Parser ligne par ligne (FIX #1)
     char line[512];
     size_t offset = 0;
-    float current_duration = 0.0f;
+    uint16_t current_duration_ms = 0;  // P1: durée en millisecondes
     int segment_idx = 0;
     int variant_idx = 0;
     int media_pos = 0;  // FIX #5: Position dans la playlist (pour sequence)
@@ -278,7 +278,9 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
             char value_buf[128];
 
             if (get_attribute_value(line, "BANDWIDTH", value_buf, sizeof(value_buf))) {
-                current_variant.bandwidth = atoll(value_buf);
+                // P1: Stocker en kbps au lieu de bps (division par 1000)
+                int64_t bw_bps = atoll(value_buf);
+                current_variant.bandwidth_kbps = (uint32_t)(bw_bps / 1000);
             }
 
             if (get_attribute_value(line, "CODECS", value_buf, sizeof(value_buf))) {
@@ -296,8 +298,8 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
             playlist->target_duration = atoi(line + 22);
         }
         else if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
-            // FIX #2: Parser MEDIA-SEQUENCE
-            playlist->media_sequence = atoll(line + 22);
+            // FIX #2: Parser MEDIA-SEQUENCE (P1: uint32_t suffit)
+            playlist->media_sequence = (uint32_t)atoll(line + 22);
         }
         else if (strncmp(line, "#EXT-X-PLAYLIST-TYPE:", 21) == 0) {
             // Juste pour info, is_live sera déterminé par ENDLIST
@@ -308,8 +310,9 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
             }
         }
         else if (strncmp(line, "#EXTINF:", 8) == 0) {
-            // Extraire la durée
-            current_duration = atof(line + 8);
+            // Extraire la durée (P1: convertir en millisecondes)
+            float duration_sec = atof(line + 8);
+            current_duration_ms = (uint16_t)(duration_sec * 1000.0f);
         }
         else if (strncmp(line, "#EXT-X-DISCONTINUITY", 20) == 0) {
             // FIX: Support DISCONTINUITY
@@ -329,8 +332,8 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
                     playlist->variants[variant_idx] = current_variant;
                     variant_idx++;
 
-                    ESP_LOGI(TAG, "Variant %d: bandwidth=%lld, url=%s",
-                             variant_idx - 1, (long long)current_variant.bandwidth, current_variant.url);
+                    ESP_LOGI(TAG, "Variant %d: bandwidth=%u kbps, url=%s",
+                             variant_idx - 1, current_variant.bandwidth_kbps, current_variant.url);
                 }
 
                 // Reset pour le prochain variant
@@ -340,13 +343,18 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
             else {
                 // Media playlist
                 // FIX #5: Incrémenter media_pos pour TOUTES les URLs (même rejetées)
-                if (current_duration > 0.0f) {
+                if (current_duration_ms > 0) {
                     // Accepter le segment
                     if (segment_idx < LIB_M3U8_PARSER_MAX_SEGMENTS) {
                         lib_m3u8_parser_segment_t *seg = &playlist->segments[segment_idx];
-                        seg->duration = current_duration;
+                        seg->duration_ms = current_duration_ms;  // P1: millisecondes
                         seg->sequence = playlist->media_sequence + media_pos;  // FIX #5: Utiliser media_pos
-                        seg->discontinuity = next_is_discontinuity;
+
+                        // P1: Gestion flags (discontinuity)
+                        seg->flags = 0;
+                        if (next_is_discontinuity) {
+                            seg->flags |= LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY;
+                        }
 
                         // Résoudre l'URL
                         resolve_url(base_url, line, seg->url, LIB_M3U8_PARSER_MAX_URL_LEN);
@@ -354,7 +362,7 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
                         segment_idx++;
                     }
 
-                    current_duration = 0.0f;
+                    current_duration_ms = 0;
                     next_is_discontinuity = false;
                 } else {
                     ESP_LOGW(TAG, "URL de segment sans EXTINF: %s (ignoré)", line);
@@ -383,8 +391,8 @@ esp_err_t lib_m3u8_parser_parse(const char *content, const char *base_url,
             ESP_LOGE(TAG, "Aucun segment trouvé dans la playlist");
             return ESP_FAIL;
         }
-        ESP_LOGI(TAG, "Media playlist parsée: %d segments, live=%d, media_seq=%lld, target_duration=%d",
-                 playlist->segment_count, playlist->is_live, (long long)playlist->media_sequence,
+        ESP_LOGI(TAG, "Media playlist parsée: %d segments, live=%d, media_seq=%u, target_duration=%d",
+                 playlist->segment_count, playlist->is_live, playlist->media_sequence,
                  playlist->target_duration);
     }
 
@@ -413,22 +421,22 @@ void lib_m3u8_parser_dump(const lib_m3u8_parser_playlist_t *playlist)
         ESP_LOGI(TAG, "Variants: %d", playlist->variant_count);
         for (int i = 0; i < playlist->variant_count; i++) {
             const lib_m3u8_parser_variant_t *v = &playlist->variants[i];
-            ESP_LOGI(TAG, "  [%d] BW=%lld bps, %dx%d, codecs=%s",
-                     i, (long long)v->bandwidth, v->width, v->height,
+            ESP_LOGI(TAG, "  [%d] BW=%u kbps, %dx%d, codecs=%s",
+                     i, v->bandwidth_kbps, v->width, v->height,
                      v->codecs[0] ? v->codecs : "none");
             ESP_LOGI(TAG, "      %s", v->url);
         }
     } else {
         ESP_LOGI(TAG, "Segments: %d", playlist->segment_count);
         ESP_LOGI(TAG, "Live: %s", playlist->is_live ? "oui" : "non");
-        ESP_LOGI(TAG, "Media sequence: %lld", (long long)playlist->media_sequence);
+        ESP_LOGI(TAG, "Media sequence: %u", playlist->media_sequence);
         ESP_LOGI(TAG, "Target duration: %d s", playlist->target_duration);
 
         for (int i = 0; i < playlist->segment_count; i++) {
             const lib_m3u8_parser_segment_t *seg = &playlist->segments[i];
-            ESP_LOGI(TAG, "  [%d] seq=%lld, %.1fs%s - %s",
-                     i, (long long)seg->sequence, seg->duration,
-                     seg->discontinuity ? " [DISC]" : "",
+            ESP_LOGI(TAG, "  [%d] seq=%u, %u ms%s - %s",
+                     i, seg->sequence, seg->duration_ms,
+                     (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISC]" : "",
                      seg->url);
         }
     }
