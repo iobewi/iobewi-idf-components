@@ -237,8 +237,12 @@ static char* download_m3u8(const char *url)
                 ESP_LOGW(TAG, "M3U8: read_len==0 persistant (%d tentatives), fin lecture", zero_read_streak);
                 // FIX: Si content_length connu et offset < attendu → potentiellement incomplet
                 if (!expect_length || offset < content_length) {
-                    ESP_LOGW(TAG, "M3U8: playlist potentiellement incomplète (attendu: %d, reçu: %d)",
-                             content_length, offset);
+                    if (expect_length) {
+                        ESP_LOGW(TAG, "M3U8: playlist incomplète (attendu: %d, reçu: %d)",
+                                 content_length, offset);
+                    } else {
+                        ESP_LOGW(TAG, "M3U8: playlist potentiellement incomplète (chunked, reçu: %d)", offset);
+                    }
                     truncated = true;
                 }
                 break;
