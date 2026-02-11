@@ -776,20 +776,77 @@ task_exit:
 }
 
 /**
- * @brief Recherche synchronisation TS (0x47 à intervalles 188 bytes)
- * @return true si sync trouvé, out_skip contient l'offset à sauter
+ * @brief Resynchronisation MPEG-TS intelligente (PID + PUSI + CC + PES start code)
+ *
+ * Valide :
+ * - Sync byte 0x47
+ * - PID audio (257 pour France Inter)
+ * - PUSI=1 (début PES)
+ * - Payload présent (AFC)
+ * - Start code PES (00 00 01)
+ * - Continuity counter cohérent sur 3 paquets
+ *
+ * @param buf Buffer à scanner
+ * @param len Taille buffer
+ * @param scan_max Limite scan
+ * @param audio_pid PID audio à chercher
+ * @param out_skip Offset du sync trouvé
+ * @return true si sync valide trouvé
  */
-static bool ts_resync_find(const uint8_t *buf, size_t len, size_t scan_max, size_t *out_skip)
+static bool ts_resync_smart(const uint8_t *buf,
+                            size_t len,
+                            size_t scan_max,
+                            uint16_t audio_pid,
+                            size_t *out_skip)
 {
     size_t n = (len < scan_max) ? len : scan_max;
-    if (n < 376) return false; // au moins 2 paquets TS
+    if (n < 188 * 3) return false; // Besoin 3 paquets TS minimum
 
-    for (size_t i = 0; i + 376 < n; i++) {
-        if (buf[i] == 0x47 && buf[i + 188] == 0x47 && buf[i + 376] == 0x47) {
-            *out_skip = i;
-            return true;
+    for (size_t i = 0; i + 188 * 2 < n; i++) {
+        if (buf[i] != 0x47) continue;
+
+        // Parse header TS
+        uint8_t b1 = buf[i + 1];
+        uint8_t b2 = buf[i + 2];
+        uint8_t b3 = buf[i + 3];
+
+        uint16_t pid = ((b1 & 0x1F) << 8) | b2;
+        uint8_t pusi = (b1 & 0x40) ? 1 : 0;
+        uint8_t afc  = (b3 & 0x30) >> 4;   // 1=payload, 2=adapt, 3=adapt+payload
+        uint8_t cc0  = (b3 & 0x0F);
+
+        // Filtres PID + PUSI + payload
+        if (pid != audio_pid) continue;
+        if (!pusi) continue;
+        if (afc != 1 && afc != 3) continue; // Payload requis
+
+        // Compute payload start (skip adaptation field si présent)
+        size_t p = i + 4;
+        if (afc == 3) {
+            uint8_t afl = buf[p];
+            p += 1 + afl;
+            if (p + 3 >= n) continue;
         }
+
+        // Vérif start code PES (00 00 01)
+        if (!(buf[p] == 0x00 && buf[p+1] == 0x00 && buf[p+2] == 0x01)) {
+            continue;
+        }
+
+        // Valider next 2 packets : sync + CC continuity (anti faux-positifs)
+        const uint8_t *p1 = buf + i + 188;
+        const uint8_t *p2 = buf + i + 376;
+        if (p1[0] != 0x47 || p2[0] != 0x47) continue;
+
+        uint8_t cc1 = p1[3] & 0x0F;
+        uint8_t cc2 = p2[3] & 0x0F;
+        if (((cc0 + 1) & 0x0F) != cc1) continue;
+        if (((cc1 + 1) & 0x0F) != cc2) continue;
+
+        *out_skip = i;
+        return true;
     }
+
     return false;
 }
 
@@ -1036,21 +1093,36 @@ static void audio_play_task(void *pvParameters)
             zero_consume_streak++;
 
             if (!using_stitch) {
-                // 6a) Tenter resync TS dans item courant (zéro copie)
+                // 6a) Tenter resync TS intelligent (PID+PUSI+CC) dans item courant
                 size_t skip = 0;
                 size_t avail = cur_len - cur_off;
 
-                // Scanner TOUT le buffer (pas juste 2KB) pour garantir de trouver le sync
-                if (ts_resync_find(cur_item + cur_off, avail, avail, &skip) && skip > 0) {
-                    ESP_LOGD(TAG, "TS resync: skip %zu bytes", skip);
-                    cur_off += skip;
-                    zero_consume_streak = 0;  // Reset streak si resync réussi
+                // Scanner TOUT le buffer avec validation protocole complète
+                if (ts_resync_smart(cur_item + cur_off, avail, avail, 257, &skip)) {
+                    // Resync réussi (skip peut être 0 si déjà aligné)
+                    if (skip > 0) {
+                        ESP_LOGD(TAG, "TS resync smart: skip %zu bytes", skip);
+                        cur_off += skip;
+                    } else {
+                        ESP_LOGD(TAG, "TS resync smart: déjà aligné (skip=0)");
+                    }
+
+                    // Reset décodeur pour état propre après resync
+                    ESP_LOGD(TAG, "Reset décodeur après resync");
+                    esp_audio_simple_dec_close(dec_handle);
+                    dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                    if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
+                        ESP_LOGE(TAG, "Échec réouverture décodeur après resync");
+                        break;
+                    }
+
+                    zero_consume_streak = 0;
                 } else {
-                    // 6b) Si proche fin item → stitch tail+head
+                    // 6b) Resync échoué : stratégie selon position
                     size_t remaining = cur_len - cur_off;
 
                     if (remaining <= STITCH_TAIL_SIZE) {
-                        // Copier tail (remaining bytes max 512)
+                        // Proche fin item → stitch tail+head
                         memcpy(stitch_buf, cur_item + cur_off, remaining);
                         stitch_len = remaining;
 
@@ -1081,9 +1153,9 @@ static void audio_play_task(void *pvParameters)
                             vTaskDelay(pdMS_TO_TICKS(20));
                         }
                     } else {
-                        // 6c) Pas proche fin : skip 188 bytes (1 paquet TS)
-                        size_t step = (remaining > 188) ? 188 : remaining;
-                        cur_off += step;
+                        // 6c) Pas proche fin et pas de sync trouvé : abandonner cet item
+                        ESP_LOGW(TAG, "TS resync échoué, abandon item (%zu bytes restants)", remaining);
+                        cur_off = cur_len;  // Force libération et passage au prochain item
                     }
                 }
             } else {
