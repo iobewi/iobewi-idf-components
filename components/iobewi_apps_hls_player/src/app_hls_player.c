@@ -1307,31 +1307,41 @@ static void audio_play_task(void *pvParameters)
         }
 
         // Ne recopier que si pas en stall (resync en cours)
+        int items_copied = 0;
+        int receive_fails = 0;
         if (!stall) {
-            while (gather_len + 188 <= GATHER_BUF_SIZE) {
-                // Timeout court si proche du seuil (évite attente inutile 20ms)
-                TickType_t rx_timeout = pdMS_TO_TICKS(20);
-                if (gather_len >= (min_gather - 188)) {
-                    rx_timeout = pdMS_TO_TICKS(3);  // 3ms si on a presque assez
-                }
+            // Budget temps global au lieu de timeout par item (anti-contention)
+            TickType_t t_start = xTaskGetTickCount();
+            TickType_t budget = pdMS_TO_TICKS(15);  // 15ms max total
 
+            while (gather_len + 188 <= GATHER_BUF_SIZE) {
+                // Calculer timeout restant
+                TickType_t elapsed = xTaskGetTickCount() - t_start;
+                if (elapsed >= budget) break;  // Budget épuisé
+
+                TickType_t rx_timeout = budget - elapsed;  // Timeout adaptatif
                 size_t ilen = 0;
                 uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, rx_timeout);
-                if (!it) break;
 
-                // Vérifier alignement TS 188-byte (temporaire debug)
+                if (!it) {
+                    receive_fails++;
+                    break;
+                }
+
+                // Vérifier alignement TS 188-byte
                 if (ilen != 188) {
                     ESP_LOGW(TAG, "Item non-188 bytes: %zu (NOSPLIT échoué!)", ilen);
                     vRingbufferReturnItem(handle->ring_buffer, it);
+                    receive_fails++;
                     continue;
                 }
 
                 // Copier dans gather_buf APRÈS leftover
                 memcpy(gather_buf + gather_len, it, ilen);
                 gather_len += ilen;
+                items_copied++;
 
                 // IMPORTANT: Rendre immédiatement l'item au ringbuffer (on a copié)
-                // Stratégie "copy then return" : pas de fuite, pas de held items
                 vRingbufferReturnItem(handle->ring_buffer, it);
 
                 // Seuil max atteint (8-16 KB selon config)
@@ -1342,20 +1352,39 @@ static void audio_play_task(void *pvParameters)
             ESP_LOGD(TAG, "Stall mode: resync sur leftover uniquement (%zu bytes)", leftover_len);
         }
 
-        // Si pas assez de données, attendre
+        // Si pas assez de données, tenter un retry court avant d'abandonner
+        if (gather_len < min_gather && !stall) {
+            // Retry court (2-3ms) si on est proche (> 50% du seuil)
+            if (gather_len >= (min_gather / 2)) {
+                size_t ilen = 0;
+                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(3));
+                if (it && ilen == 188) {
+                    memcpy(gather_buf + gather_len, it, ilen);
+                    gather_len += ilen;
+                    items_copied++;
+                    vRingbufferReturnItem(handle->ring_buffer, it);
+                } else if (it) {
+                    vRingbufferReturnItem(handle->ring_buffer, it);
+                    receive_fails++;
+                } else {
+                    receive_fails++;
+                }
+            }
+        }
+
+        // Si toujours pas assez de données, attendre
         if (gather_len < min_gather) {
             // Starvation temporaire (pas forcément audible)
             no_data_streak++;
 
-            // Log UNDERRUN seulement si ça dure (> 10 cycles = ~200-400ms)
+            // Log UNDERRUN seulement si ça dure (>= 10 cycles = ~200-400ms)
             if (no_data_streak >= 10) {
-                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes (leftover=%zu), buffer=%d%%, stall=%d",
-                         gather_len, min_gather, leftover_len, buffer_level, stall);
+                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, items=%d, fails=%d, stall=%d",
+                         gather_len, min_gather, buffer_level, items_copied, receive_fails, stall);
                 no_data_streak = 0;  // Reset pour éviter spam
             }
 
             // Rollback : revenir au leftover (items déjà rendus au ringbuffer)
-            // NOTE: données copiées après leftover sont ignorées (seront réécrites au prochain cycle)
             gather_len = leftover_len;
 
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -1728,13 +1757,14 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     xSemaphoreGive(handle->download_semaphore);
 
     // Créer les tâches
-    BaseType_t ret = xTaskCreate(hls_fetch_task, "hls_fetch", 14336, handle, 5, &handle->fetch_task);
+    // Core pinning : fetch sur CPU0 (Wi-Fi/TLS), play sur CPU1 (isolation audio)
+    BaseType_t ret = xTaskCreatePinnedToCore(hls_fetch_task, "hls_fetch", 14336, handle, 5, &handle->fetch_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de téléchargement");
         return ESP_FAIL;
     }
 
-    ret = xTaskCreate(audio_play_task, "audio_play", 6144, handle, 8, &handle->play_task);
+    ret = xTaskCreatePinnedToCore(audio_play_task, "audio_play", 6144, handle, 8, &handle->play_task, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de lecture");
         // FIX CRITIQUE: Ne pas vTaskDelete brutal (peut laisser stack HTTP sale)
