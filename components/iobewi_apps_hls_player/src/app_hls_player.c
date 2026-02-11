@@ -1179,6 +1179,14 @@ static void audio_play_task(void *pvParameters)
         // === 3) Remplir gather buffer avec N items (en gardant leftover) ===
         // Remplir gather_buf jusqu'à ~GATHER_BUF_SIZE (ou au moins MIN_GATHER)
         // FIX: Respecter leftover_len (bytes déjà présents à conserver)
+
+        // Sauvegarder old_leftover_len AVANT remplissage (utilisé dans section 6)
+        size_t old_leftover_len = leftover_len;
+
+        // Réinitialiser held_items[] (ne contient QUE les nouveaux items du cycle)
+        held_count = 0;
+        held_bytes = 0;
+
         gather_len = leftover_len;
         const size_t MIN_GATHER = 188 * 16;  // 16 paquets TS minimum (~3 KB)
 
@@ -1261,65 +1269,66 @@ static void audio_play_task(void *pvParameters)
         }
 
         // === 6) Appliquer consumed: libérer items et créer leftover ===
-        // FIX CRITIQUE: Ne libérer QUE les items entièrement consommés,
-        // et garder le reste comme leftover pour le prochain cycle
+        // FIX CRITIQUE: UN SEUL memmove (pas de double déplacement)
+        // On utilise old_leftover_len capturé avant remplissage.
+        // gather_buf = [0..old_leftover_len-1] (leftover précédent)
+        //             [old_leftover_len..gather_len-1] (nouveaux items copiés)
+        // held_items[] correspond AUX nouveaux items seulement.
+
         if (raw.consumed > 0) {
-            size_t to_consume = raw.consumed;
+            size_t consumed = raw.consumed;
+            if (consumed > gather_len) consumed = gather_len;
 
-            // a) Consommer d'abord dans leftover existant (bytes avant held_items)
-            if (leftover_len > 0) {
-                size_t c = (to_consume < leftover_len) ? to_consume : leftover_len;
-                to_consume -= c;
-                leftover_len -= c;
-
-                if (leftover_len > 0) {
-                    // Il reste du leftover non consommé: décaler au début
-                    memmove(gather_buf, gather_buf + c, leftover_len);
-                } else {
-                    leftover_len = 0;
-                }
+            // A) Calculer combien de bytes consommés tombent dans les nouveaux items
+            size_t consumed_from_new = 0;
+            if (consumed > old_leftover_len) {
+                consumed_from_new = consumed - old_leftover_len;
             }
 
-            // b) Libérer des items 188 entièrement consommés
-            int release_count = 0;
-            while (to_consume >= 188 && release_count < held_count) {
-                vRingbufferReturnItem(handle->ring_buffer, held_items[release_count]);
-                to_consume -= held_lens[release_count];
-                release_count++;
+            // B) Libérer les items entièrement consommés côté "new"
+            // Les items sont tous 188 bytes
+            int release_count = (int)(consumed_from_new / 188);
+
+            if (release_count > held_count) release_count = held_count;
+
+            for (int i = 0; i < release_count; i++) {
+                vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
             }
 
-            // c) Gérer consumed non multiple de 188 (rare mais possible)
-            if (to_consume > 0 && to_consume < 188) {
-                ESP_LOGW(TAG, "consumed non multiple de 188: %zu bytes (leftover forced)", to_consume);
-                // On garde le reste de l'item partiellement consommé comme leftover
-            }
-
-            // d) Recompacter held_items[] (retirer ceux relâchés)
+            // C) Recompacter held_items[] (retirer ceux relâchés)
             if (release_count > 0) {
                 for (int i = release_count; i < held_count; i++) {
                     held_items[i - release_count] = held_items[i];
-                    held_lens[i - release_count] = held_lens[i];
+                    held_lens[i - release_count]  = held_lens[i];
                 }
                 held_count -= release_count;
                 held_bytes -= (release_count * 188);
             }
 
-            // e) Construire nouveau leftover = (gather_len - raw.consumed)
-            size_t remaining = (raw.consumed < gather_len) ? (gather_len - raw.consumed) : 0;
+            // D) Warning si consumed_from_new pas multiple de 188
+            // (ça signifie consommation au milieu d'un paquet TS: rare mais possible)
+            size_t rem_new = consumed_from_new % 188;
+            if (rem_new != 0) {
+                ESP_LOGW(TAG, "consumed traverse TS packet boundary: rem_new=%zu (keeping as leftover)", rem_new);
+                // On NE rend pas l'item partiellement consommé (il reste dans held_items[0])
+            }
+
+            // E) Construire le nouveau leftover = ce qui reste après consumed
+            // FIX: UN SEUL memmove basé sur raw.consumed (pas de double déplacement)
+            size_t remaining = gather_len - consumed;
             if (remaining > 0) {
-                memmove(gather_buf, gather_buf + raw.consumed, remaining);
+                memmove(gather_buf, gather_buf + consumed, remaining);
                 leftover_len = remaining;
             } else {
                 leftover_len = 0;
             }
 
-            // Reset streak seulement si consumed > 0 et pas d'erreur
+            // F) Reset streak si OK
             if (dec_ret == ESP_AUDIO_ERR_OK) {
                 zero_consume_streak = 0;
             }
         } else {
-            // consumed == 0 : ne rien libérer, conserver gather_buf tel quel comme leftover
-            // pour retry au prochain cycle
+            // consumed == 0 : ne rien libérer, retry plus tard avec les mêmes données
             leftover_len = gather_len;
         }
 
