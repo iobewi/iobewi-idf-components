@@ -1,8 +1,9 @@
 # Synthèse Technique : Erreurs AAC Persistantes dans app_hls_player
 
-**Date** : 2026-02-11
+**Date** : 2026-02-11 (mis à jour)
 **Contexte** : Streaming HLS (France Inter FIP midfi, AAC/MPEG-TS ~185 kbps) sur ESP32-S3
 **Objectif** : Évaluer l'état actuel et identifier les pistes d'amélioration pour éliminer les erreurs de décodage
+**Version** : Code stable avec architecture zéro-copie (commit d16da08)
 
 ---
 
@@ -22,17 +23,17 @@ Ring Buffer (256 KB) → Curseur (cur_item, cur_off) → Décodeur TS/AAC → Au
 - Stitch buffer : **2 KB** (vs 144 KB) ✅
 - **Gain total : -142 KB (-98.6%)**
 
-### Performance Mesurée (Test 72 secondes)
+### Performance Mesurée (Test 452 secondes = 7.5 minutes)
 
 | Métrique | Valeur | État |
 |----------|--------|------|
 | **WiFi connexion** | 2.3s | ✅ Excellent |
 | **Audio démarrage** | ~5s | ✅ Bon |
-| **Frames PCM produits** | 5400+ | ✅ Fluide |
-| **Stitch activations** | 0 | ✅ Curseur pur |
+| **Frames PCM produits** | 34600+ | ✅ Fluide |
+| **Stitch activations** | Minimal | ✅ Curseur principal |
 | **Heap stable** | 1.91 MB min | ✅ Stable |
-| **Buffer fill** | 13-73% | ✅ Variable mais OK |
-| **Erreurs AAC** | **9 en 72s** | ⚠️ **~7.5/min** |
+| **Buffer fill** | 32-65% | ✅ Bon |
+| **Erreurs AAC** | **35 en 452s** | ⚠️ **~4.6/min** |
 
 ---
 
@@ -42,25 +43,23 @@ Ring Buffer (256 KB) → Curseur (cur_item, cur_off) → Décodeur TS/AAC → Au
 
 **Fréquence des erreurs**
 ```
-Timeline (72s de lecture):
-- t=4s   : 2 erreurs (cold start)
-- t=18s  : 3 erreurs (groupées)
-- t=29s  : 1 erreur
-- t=45s  : 1 erreur
-- t=59s  : 1 erreur
-- t=72s  : 1 erreur
+Timeline (452s de lecture = 7.5 minutes):
+- Répartition : ~35 erreurs dispersées sur la session
+- Pattern : Erreurs intermittentes, pas de clusters massifs
+- Moyenne : ~4.6 erreurs/minute
 ───────────────────────────────
-Total    : 9 erreurs = 7.5/min
+Total    : 35 erreurs = 4.6/min
 ```
 
 **Amélioration vs Versions Précédentes**
 | Version | Erreurs/min | Amélioration |
 |---------|-------------|--------------|
 | P1.3 Remainder 64KB | 50+ | Baseline |
-| P1.3 Remainder 8KB | 80+ | -60% ❌ |
-| Zéro-Copie (actuel) | **7.5** | **+85%** ✅ |
+| P1.3 Remainder 8KB | 20-24 | Baseline |
+| Zéro-Copie v1 | 7.5 | +68% vs 8KB |
+| **Zéro-Copie v2 (actuel)** | **4.6** | **+77% vs 8KB** ✅ |
 
-**Constat** : Forte amélioration mais pas encore zéro erreur.
+**Constat** : Amélioration significative (~77%) mais pas encore zéro erreur.
 
 ### Symptôme Technique
 
@@ -313,9 +312,9 @@ Pour valider une solution, les critères sont :
 
 | Métrique | Cible | Actuel |
 |----------|-------|--------|
-| Erreurs AAC | **< 1/min** | 7.5/min ❌ |
-| Frames PCM/min | > 3000 | 4500 ✅ |
-| Stitch activations | < 10 | 0 ✅ |
+| Erreurs AAC | **< 1/min** | 4.6/min ⚠️ (amélioration +77%) |
+| Frames PCM/min | > 3000 | 4600 ✅ |
+| Stitch activations | < 10 | Minimal ✅ |
 | Reset décodeur | < 1/10min | 0 ✅ |
 | Heap stable | > 1.8 MB | 1.91 MB ✅ |
 
@@ -425,7 +424,7 @@ Pour valider une solution, les critères sont :
 - Amélioration 85% vs versions précédentes
 
 **Points d'Amélioration ⚠️**
-- **7.5 erreurs AAC/min** (cible < 1/min)
+- **4.6 erreurs AAC/min** (cible < 1/min, progrès +77%)
 - Resync TS basique (sync bytes seulement)
 - Pas de parsing headers MPEG-TS
 
@@ -437,8 +436,9 @@ Pour valider une solution, les critères sont :
 
 ### Question pour l'Équipe
 
-**Le niveau d'erreur actuel (7.5/min) est-il acceptable pour un MVP/prototype ?**
+**Le niveau d'erreur actuel (4.6/min) est-il acceptable pour un MVP/prototype ?**
 - ✅ **Oui** → Passer aux autres features, améliorer plus tard
+- ⚠️ **Acceptable mais peut mieux faire** → Tester Option A (parser TS) pour viser < 2/min
 - ❌ **Non** → Prioriser Option A (parser TS) avant release
 
 ---
