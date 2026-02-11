@@ -118,6 +118,10 @@ static esp_err_t init_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Fix #3: Désactiver WiFi power save pour stabilité streaming
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_LOGI(TAG, "WiFi power save: DISABLED (streaming audio)");
+
     ESP_LOGI(TAG, "Connexion au WiFi SSID: %s", WIFI_SSID);
 
     // Attendre la connexion (max 30 secondes)
