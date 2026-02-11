@@ -1167,33 +1167,46 @@ static void audio_play_task(void *pvParameters)
         // FIX: Respecter leftover_len (bytes déjà présents à conserver)
         // Stratégie "copy then return" : copier puis rendre immédiatement
 
+        // Défense: leftover ne doit jamais dépasser GATHER_BUF_SIZE
+        if (leftover_len > GATHER_BUF_SIZE) {
+            ESP_LOGW(TAG, "leftover overflow: %zu > %zu, flushing", leftover_len, GATHER_BUF_SIZE);
+            leftover_len = 0;
+        }
+
+        // FIX STALL: Si consumed==0 persiste, ne pas recopier (resync sur leftover uniquement)
+        bool stall = (zero_consume_streak > 0);
+
         gather_len = leftover_len;
         const size_t MIN_GATHER = 188 * 16;  // 16 paquets TS minimum (~3 KB)
-        int items_copied = 0;
 
-        while (gather_len + 188 <= GATHER_BUF_SIZE) {
-            size_t ilen = 0;
-            uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(20));
-            if (!it) break;
+        // Ne recopier que si pas en stall (resync en cours)
+        if (!stall) {
+            while (gather_len + 188 <= GATHER_BUF_SIZE) {
+                size_t ilen = 0;
+                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(20));
+                if (!it) break;
 
-            // Vérifier alignement TS 188-byte (temporaire debug)
-            if (ilen != 188) {
-                ESP_LOGW(TAG, "Item non-188 bytes: %zu (NOSPLIT échoué!)", ilen);
+                // Vérifier alignement TS 188-byte (temporaire debug)
+                if (ilen != 188) {
+                    ESP_LOGW(TAG, "Item non-188 bytes: %zu (NOSPLIT échoué!)", ilen);
+                    vRingbufferReturnItem(handle->ring_buffer, it);
+                    continue;
+                }
+
+                // Copier dans gather_buf APRÈS leftover
+                memcpy(gather_buf + gather_len, it, ilen);
+                gather_len += ilen;
+
+                // IMPORTANT: Rendre immédiatement l'item au ringbuffer (on a copié)
+                // Stratégie "copy then return" : pas de fuite, pas de held items
                 vRingbufferReturnItem(handle->ring_buffer, it);
-                continue;
+
+                // Seuil max atteint (8-16 KB selon config)
+                if (gather_len >= GATHER_BUF_SIZE) break;
             }
-
-            // Copier dans gather_buf APRÈS leftover
-            memcpy(gather_buf + gather_len, it, ilen);
-            gather_len += ilen;
-            items_copied++;
-
-            // IMPORTANT: Rendre immédiatement l'item au ringbuffer (on a copié)
-            // Stratégie "copy then return" : pas de fuite, pas de held items
-            vRingbufferReturnItem(handle->ring_buffer, it);
-
-            // Seuil max atteint (8-16 KB selon config)
-            if (gather_len >= GATHER_BUF_SIZE) break;
+        } else {
+            // En stall: on travaille uniquement sur leftover (resync + reset)
+            ESP_LOGD(TAG, "Stall mode: resync sur leftover uniquement (%zu bytes)", leftover_len);
         }
 
         // Si pas assez de données, attendre
@@ -1204,12 +1217,13 @@ static void audio_play_task(void *pvParameters)
                 size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
                 size_t filled = handle->buffer_size - free_size;
                 int level = (filled * 100) / handle->buffer_size;
-                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes (leftover=%zu), buffer=%d%%",
-                         gather_len, MIN_GATHER, leftover_len, level);
+                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes (leftover=%zu), buffer=%d%%, stall=%d",
+                         gather_len, MIN_GATHER, leftover_len, level, stall);
                 no_data_streak = 0;  // Reset pour éviter spam
             }
 
             // Rollback : revenir au leftover (items déjà rendus au ringbuffer)
+            // NOTE: données copiées après leftover sont ignorées (seront réécrites au prochain cycle)
             gather_len = leftover_len;
 
             vTaskDelay(pdMS_TO_TICKS(20));
