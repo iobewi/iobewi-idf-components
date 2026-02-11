@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
@@ -41,6 +42,9 @@ static const char *TAG = "app_hls_player";
 #ifndef CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
     #define CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL 1
 #endif
+#ifndef CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE
+    #define CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE 8
+#endif
 
 /**
  * @brief Structure interne du player HLS
@@ -62,6 +66,8 @@ struct app_hls_player_s {
     int target_duration;                    /**< Target duration pour timeout refresh */
     uint32_t drop_count;                    /**< Compteur pertes ring buffer (rate limit log) */
     uint32_t drop_old_count;                /**< Compteur drop-old (stratégie live-ness) */
+    uint8_t ts_carry[188];                  /**< Carry buffer pour alignement TS 188-byte */
+    size_t ts_carry_len;                    /**< Nombre de bytes dans ts_carry */
 };
 
 /**
@@ -148,61 +154,105 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
             if (evt->data_len > 0 && handle->ring_buffer) {
-                bool sent_ok = false;
+                // [TS ALIGNMENT] Alignement TS 188-byte sans malloc pour stabilité
+                const uint8_t *src = (const uint8_t *)evt->data;
+                size_t src_len = (size_t)evt->data_len;
 
-                // Timeout 0 (non-blocking) pour ne jamais bloquer la stack HTTP
-                if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) == pdTRUE) {
-                    sent_ok = true;
-                } else {
+                // 1) Si carry existe, compléter jusqu'à 188
+                if (handle->ts_carry_len > 0) {
+                    size_t need = 188 - handle->ts_carry_len;
+                    size_t take = (src_len < need) ? src_len : need;
+
+                    memcpy(handle->ts_carry + handle->ts_carry_len, src, take);
+                    handle->ts_carry_len += take;
+                    src += take;
+                    src_len -= take;
+
+                    // Si on a un paquet TS complet, l'envoyer
+                    if (handle->ts_carry_len == 188) {
+                        bool sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
 #if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
-                    // Stratégie drop-old : retirer un chunk ancien pour faire de la place
-                    size_t drop_sz = 0;
-                    void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
-                    if (drop) {
-                        vRingbufferReturnItem(handle->ring_buffer, drop);
-                        (void)drop_sz;  // Utilisé par xRingbufferReceive, garde pour doc
-                        handle->drop_old_count++;
-
-                        // Retenter l'envoi
-                        if (xRingbufferSend(handle->ring_buffer, evt->data, evt->data_len, 0) == pdTRUE) {
-                            sent_ok = true;
-                            if ((handle->drop_old_count % 100) == 0) {
-                                ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
+                        if (!sent_ok) {
+                            size_t drop_sz = 0;
+                            void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
+                            if (drop) {
+                                vRingbufferReturnItem(handle->ring_buffer, drop);
+                                handle->drop_old_count++;
+                                sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
+                                if (sent_ok && (handle->drop_old_count % 100) == 0) {
+                                    ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
+                                }
+                            }
+                        }
+#endif
+                        if (sent_ok) {
+                            if (handle->stats_mutex) {
+                                xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
+                                handle->bytes_downloaded += 188;
+                                xSemaphoreGive(handle->stats_mutex);
+                            } else {
+                                handle->bytes_downloaded += 188;
                             }
                         } else {
-                            // Toujours plein même après drop
                             handle->drop_count++;
                             if ((handle->drop_count % 100) == 0) {
-                                ESP_LOGW(TAG, "Ring buffer plein après drop-old (new x%u, old x%u)",
-                                         (unsigned)handle->drop_count, (unsigned)handle->drop_old_count);
+                                ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
                             }
                         }
-                    } else {
-                        // Rien à dropper (buffer vide ou condition race)
-                        handle->drop_count++;
-                        if ((handle->drop_count % 100) == 0) {
-                            ESP_LOGW(TAG, "Ring buffer plein mais rien à drop (x%u)", (unsigned)handle->drop_count);
-                        }
+
+                        handle->ts_carry_len = 0;
                     }
-#else
-                    // Stratégie drop-new (classic)
-                    handle->drop_count++;
-                    if ((handle->drop_count % 100) == 0) {
-                        ESP_LOGW(TAG, "Ring buffer plein, données perdues (x%u)", (unsigned)handle->drop_count);
-                    }
-#endif
                 }
 
-                // Update stats si envoi réussi
-                if (sent_ok) {
-                    if (handle->stats_mutex) {
-                        xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
-                        handle->bytes_downloaded += evt->data_len;
-                        xSemaphoreGive(handle->stats_mutex);
-                    } else {
-                        // Best effort si pas de mutex (ne devrait jamais arriver)
-                        handle->bytes_downloaded += evt->data_len;
+                // 2) [FIX CRITIQUE] Envoyer paquet-par-paquet (188) pour drop-old granulaire
+                // Avant: bulk aligné (3948 bytes) → drop 21 paquets d'un coup → corruption TS massive
+                // Après: 188 bytes → drop 1 paquet max → corruption minimale
+                while (src_len >= 188) {
+                    bool sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
+#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
+                    if (!sent_ok) {
+                        size_t drop_sz = 0;
+                        void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
+                        if (drop) {
+                            vRingbufferReturnItem(handle->ring_buffer, drop);
+                            handle->drop_old_count++;
+
+                            // [FIX RESYNC] NOTIF_RESET sur drop-old (discontinuité TS)
+                            if (handle->play_task && (handle->drop_old_count % 10) == 0) {
+                                xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+                            }
+
+                            sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
+                            if (sent_ok && (handle->drop_old_count % 100) == 0) {
+                                ESP_LOGI(TAG, "Drop-old activé (x%u)", (unsigned)handle->drop_old_count);
+                            }
+                        }
                     }
+#endif
+                    if (sent_ok) {
+                        if (handle->stats_mutex) {
+                            xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
+                            handle->bytes_downloaded += 188;
+                            xSemaphoreGive(handle->stats_mutex);
+                        } else {
+                            handle->bytes_downloaded += 188;
+                        }
+                    } else {
+                        handle->drop_count++;
+                        if ((handle->drop_count % 100) == 0) {
+                            ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
+                        }
+                    }
+
+                    src += 188;
+                    src_len -= 188;
+                }
+
+                // 3) Reste (<188) -> carry (append)
+                if (src_len > 0) {
+                    // src_len < 188 garanti ici
+                    memcpy(handle->ts_carry, src, src_len);
+                    handle->ts_carry_len = src_len;
                 }
             }
             break;
@@ -376,18 +426,29 @@ static char* download_m3u8(const char *url)
         if (read_len > 0) {
             offset += read_len;
             zero_read_streak = 0;  // Reset streak sur succès
+
+            // [FIX LAG] Early exit si content_length connu et complet
+            if (content_length > 0 && offset >= content_length) {
+                break;
+            }
         } else if (read_len == 0) {
             // FIX: read==0 peut être temporaire (pas forcément EOF)
             if (++zero_read_streak > 5) {  // ~5 tentatives
                 ESP_LOGW(TAG, "M3U8: read_len==0 persistant (%d tentatives), fin lecture", zero_read_streak);
-                // FIX: Si content_length connu et offset < attendu → potentiellement incomplet
-                if (!expect_length || offset < content_length) {
-                    if (expect_length) {
-                        ESP_LOGW(TAG, "M3U8: playlist incomplète (attendu: %d, reçu: %d)",
-                                 content_length, offset);
+
+                // FIX CHUNKED: Accepter playlist si on a reçu des données (offset > 0)
+                if (offset > 0) {
+                    // Si content_length connu : incomplet seulement si offset < content_length
+                    if (expect_length && offset < content_length) {
+                        ESP_LOGW(TAG, "M3U8: playlist incomplète (attendu: %d, reçu: %d)", content_length, offset);
+                        truncated = true;
                     } else {
-                        ESP_LOGW(TAG, "M3U8: playlist potentiellement incomplète (chunked, reçu: %d)", offset);
+                        // Chunked/CL=0 : on accepte ce qu'on a
+                        ESP_LOGI(TAG, "M3U8: chunked/CL=0, acceptation des %d bytes reçus", offset);
+                        truncated = false;
                     }
+                } else {
+                    // Rien reçu
                     truncated = true;
                 }
                 break;
@@ -512,7 +573,12 @@ static void hls_fetch_task(void *pvParameters)
 
         handle->is_downloading = true;
 
+        // [DIAG LAG] Mesurer temps de téléchargement M3U8 master
+        int64_t t0 = esp_timer_get_time();
         char *m3u8_content = download_m3u8(handle->stream_url);
+        int64_t t1 = esp_timer_get_time();
+        ESP_LOGI(TAG, "[REFRESH] master m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
+
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
             handle->is_downloading = false;
@@ -610,7 +676,12 @@ static void hls_fetch_task(void *pvParameters)
             strncpy(media_url, playlist.variants[idx_selected].url, LIB_M3U8_PARSER_MAX_URL_LEN - 1);
             media_url[LIB_M3U8_PARSER_MAX_URL_LEN - 1] = '\0';
 
+            // [DIAG LAG] Mesurer temps de téléchargement M3U8 media
+            t0 = esp_timer_get_time();
             m3u8_content = download_m3u8(media_url);
+            t1 = esp_timer_get_time();
+            ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
+
             if (m3u8_content == NULL) {
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
@@ -657,9 +728,28 @@ static void hls_fetch_task(void *pvParameters)
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
         bool downloaded = false;
 
-        // FIX #13: Cold start avec buffer initial plus grand
-        // RFC recommande 3× target_duration au démarrage pour stabilité
-        const int segments_per_cycle = (last_sequence_number < 0) ? 4 : 2;
+        // FIX #13: Segments adaptatifs au buffer (évite overflow → drop-old → corruption)
+        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
+        size_t filled = handle->buffer_size - free_size;
+        int level = (filled * 100) / handle->buffer_size;
+
+        int segments_per_cycle;
+        if (last_sequence_number < 0) {
+            // Cold start: buffer initial
+            segments_per_cycle = 4;
+        } else if (level > 70) {
+            // Buffer presque plein → ralentir
+            segments_per_cycle = 1;
+        } else if (level > 50) {
+            // Buffer mi-plein → modéré
+            segments_per_cycle = 2;
+        } else if (level > 30) {
+            // Buffer bas → accélérer
+            segments_per_cycle = 3;
+        } else {
+            // Buffer critique → remplir vite
+            segments_per_cycle = 4;
+        }
 
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
@@ -840,11 +930,15 @@ static bool ts_resync_smart(const uint8_t *buf,
 
         // Compute payload start (skip adaptation field si présent)
         size_t p = i + 4;
+        size_t pkt_end = i + 188;  // Fin du paquet TS courant
         if (afc == 3) {
+            if (p >= pkt_end) continue;  // Vérif AVANT lecture afl
             uint8_t afl = buf[p];
             p += 1 + afl;
-            if (p + 3 >= n) continue;
+            if (p >= pkt_end) continue;  // Payload doit rester dans paquet TS
         }
+        if (p + 2 >= pkt_end) continue;  // PES start code (3 bytes) doit être dans paquet
+        if (p + 2 >= n) continue;        // Vérif buffer global
 
         // Vérif start code PES (00 00 01)
         if (!(buf[p] == 0x00 && buf[p+1] == 0x00 && buf[p+2] == 0x01)) {
@@ -852,19 +946,25 @@ static bool ts_resync_smart(const uint8_t *buf,
         }
         dbg_pes_ok++;
 
-        // Valider next 2 packets : sync bytes seulement (pas CC car discontinuités légitimes)
+        // Valider next 2 packets : sync + au moins 1 PID audio
         const uint8_t *p1 = buf + i + 188;
         const uint8_t *p2 = buf + i + 376;
         if (p1[0] != 0x47 || p2[0] != 0x47) continue;
 
-        // CC validation DÉSACTIVÉE : trop stricte, discontinuités légitimes possibles
-        // uint8_t cc1 = p1[3] & 0x0F;
-        // uint8_t cc2 = p2[3] & 0x0F;
-        // if (((cc0 + 1) & 0x0F) != cc1) continue;
-        // if (((cc1 + 1) & 0x0F) != cc2) continue;
-        dbg_cc_ok++;  // Compter comme succès (validation désactivée)
+        // Au moins 1 des 2 paquets suivants doit avoir PID audio
+        // (tolère PAT/PMT/autres, mais réduit faux positifs)
+        uint16_t pid1 = ((p1[1] & 0x1F) << 8) | p1[2];
+        uint16_t pid2 = ((p2[1] & 0x1F) << 8) | p2[2];
+        if (pid1 != audio_pid && pid2 != audio_pid) continue;
+
+        // Validation : PID + PUSI + PES + 3 sync + au moins 1 PID audio
+        dbg_cc_ok++;
 
         *out_skip = i;
+
+        // Log détaillé du resync trouvé (par appel, pas cumulé)
+        ESP_LOGD(TAG, "resync_smart HIT at skip=%zu pid=%u pusi=%u afc=%u cc=%u",
+                 i, pid, pusi, afc, cc0);
 
         if (log_stats) {
             ESP_LOGW(TAG, "[RESYNC DEBUG] Appels=%d, Sync=0x47:%d, PID:%d, PUSI:%d, AFC:%d, PES:%d, CC:%d, SUCCESS:%d",
@@ -879,6 +979,32 @@ static bool ts_resync_smart(const uint8_t *buf,
                  dbg_calls, dbg_sync_found, dbg_pid_ok, dbg_pusi_ok, dbg_afc_ok, dbg_pes_ok, dbg_cc_ok);
     }
 
+    return false;
+}
+
+/**
+ * @brief Recherche le prochain sync byte 0x47 validé (espacement 188 bytes)
+ *
+ * FIX: Valide que les sync bytes sont espacés de 188 bytes pour éviter
+ * faux positifs (0x47 dans payload). Triple check si possible.
+ *
+ * @param buf Buffer à scanner
+ * @param len Taille buffer
+ * @param out_skip Offset du prochain sync valide
+ * @return true si trouvé et validé
+ */
+static bool ts_find_next_sync(const uint8_t *buf, size_t len, size_t *out_skip)
+{
+    for (size_t i = 0; i + 188 < len; i++) {
+        if (buf[i] == 0x47 && buf[i + 188] == 0x47) {
+            // Bonus: triple check si disponible
+            if (i + 376 < len && buf[i + 376] != 0x47) {
+                continue;  // Faux positif, continuer scan
+            }
+            *out_skip = i;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -916,36 +1042,35 @@ static void audio_play_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Décodeur TS créé avec succès");
 
-    // [RAM OPT P1.3 ZC] Curseur zéro-copie + stitch mini pour cas limites
-    #define STITCH_BUF_SIZE   2048
-    #define STITCH_TAIL_SIZE   512
-    #define STITCH_HEAD_SIZE  (STITCH_BUF_SIZE - STITCH_TAIL_SIZE)
+    // [RAM OPT P1.3] Gather buffer pour assembler N paquets TS avant décodage
+    // Items ringbuffer = 188 bytes, mais décodeur a besoin 4-8 KB contiguë
     #define RESYNC_SCAN_MAX   4096
     #define ZERO_CONSUME_MAX    20
+    #define MAX_HELD_ITEMS    64   // Max items gardés (~64 * 188 = 12 KB)
 
+    const size_t GATHER_BUF_SIZE = CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE * 1024;
     const size_t DEC_BUF_SIZE = CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE * 1024;
 
-    ESP_LOGI(TAG, "[RAM OPT P1.3 ZC] Mode zéro-copie: curseur sur ringbuffer, stitch=%d bytes, dec=%zu KB",
-             STITCH_BUF_SIZE, CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE);
+    ESP_LOGI(TAG, "[RAM OPT P1.3] Gather buffer mode: gather=%zu KB, dec=%zu KB",
+             CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE, CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE);
 
-    // Curseur sur item ringbuffer (remplace remainder_buf 64KB)
-    uint8_t *cur_item = NULL;
-    size_t cur_len = 0;
-    size_t cur_off = 0;
+    // Gather buffer (accumule N items de 188 avant décodage)
+    uint8_t *gather_buf = malloc(GATHER_BUF_SIZE);
+    size_t gather_len = 0;
 
-    // Mini stitch buffer pour cas consumed==0 proche fin item
-    uint8_t *stitch_buf = malloc(STITCH_BUF_SIZE);
-    size_t stitch_len = 0;
-    size_t stitch_head_from_next = 0;
-    bool using_stitch = false;
+    // File d'items "en attente de retour" (held items)
+    // NOTE: Tous les items font 188 bytes (NOSPLIT), pas besoin de held_lens[]
+    uint8_t *held_items[MAX_HELD_ITEMS];
+    int held_count = 0;
+    size_t held_bytes = 0;  // Total bytes dans held
 
     // Buffer PCM décodé
     int16_t *decoded_buffer = malloc(DEC_BUF_SIZE);
 
-    if (stitch_buf == NULL || decoded_buffer == NULL) {
+    if (gather_buf == NULL || decoded_buffer == NULL) {
         ESP_LOGE(TAG, "Échec d'allocation des buffers de décodage");
         esp_audio_simple_dec_close(dec_handle);
-        free(stitch_buf);
+        free(gather_buf);
         free(decoded_buffer);
         if (handle->play_done) {
             xSemaphoreGive(handle->play_done);
@@ -955,7 +1080,8 @@ static void audio_play_task(void *pvParameters)
     }
 
     int zero_consume_streak = 0;
-    int stitch_count = 0;
+    int resync_count = 0;
+    int no_data_streak = 0;  // [DIAG LAG] Compteur underrun
 
     ESP_LOGI(TAG, "Démarrage de la lecture audio...");
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -976,25 +1102,32 @@ static void audio_play_task(void *pvParameters)
             if (notif & NOTIF_RESET) {
                 ESP_LOGW(TAG, "NOTIF_RESET reçue - reset décodeur suite DISCONTINUITY");
 
-                // Vider le ring buffer
+                // FIX: Drop seulement quelques items au lieu de tout vider (30-50 items)
+                // Évite création de "trous" inutiles dans le stream
                 size_t item_size = 0;
                 void *item;
-                while ((item = xRingbufferReceive(handle->ring_buffer, &item_size, 0)) != NULL) {
+                int drop_count = 0;
+                const int MAX_DROP = 40;  // ~40 * 188 = 7.5 KB
+
+                while (drop_count < MAX_DROP && (item = xRingbufferReceive(handle->ring_buffer, &item_size, 0)) != NULL) {
                     vRingbufferReturnItem(handle->ring_buffer, item);
+                    drop_count++;
                 }
 
-                // Reset curseur (libérer item actuel)
-                if (cur_item != NULL) {
-                    vRingbufferReturnItem(handle->ring_buffer, cur_item);
-                    cur_item = NULL;
-                    cur_len = 0;
-                    cur_off = 0;
+                ESP_LOGI(TAG, "NOTIF_RESET: dropped %d items (%zu bytes)", drop_count, drop_count * 188);
+
+                // Libérer tous les held items
+                for (int i = 0; i < held_count; i++) {
+                    vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
                 }
 
-                // Reset stitch
-                stitch_len = 0;
-                stitch_head_from_next = 0;
-                using_stitch = false;
+                // Reset gather state
+                gather_len = 0;
+                held_count = 0;
+                held_bytes = 0;
+
+                // Reset TS carry (alignement)
+                handle->ts_carry_len = 0;
 
                 // Recréer le décodeur
                 ESP_LOGI(TAG, "Fermeture décodeur...");
@@ -1004,7 +1137,11 @@ static void audio_play_task(void *pvParameters)
                 dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
                 if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
                     ESP_LOGE(TAG, "Échec réouverture décodeur après DISCONTINUITY: %d", dec_ret);
-                    free(stitch_buf);
+                    // Libérer held items avant cleanup
+                    for (int i = 0; i < held_count; i++) {
+                        vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
+                    }
+                    free(gather_buf);
                     free(decoded_buffer);
                     if (handle->play_done) {
                         xSemaphoreGive(handle->play_done);
@@ -1037,37 +1174,72 @@ static void audio_play_task(void *pvParameters)
             download_signaled = false;
         }
 
-        // === 3) Assurer qu'on a un item courant (zéro-copie) ===
-        if (!using_stitch) {
-            if (cur_item == NULL || cur_off >= cur_len) {
-                // Besoin d'un nouvel item
-                if (cur_item != NULL) {
-                    vRingbufferReturnItem(handle->ring_buffer, cur_item);
-                    cur_item = NULL;
-                }
-
-                cur_item = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &cur_len, pdMS_TO_TICKS(100));
-                cur_off = 0;
-
-                if (cur_item == NULL) {
-                    // Pas de données, attendre
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                    continue;
-                }
-            }
+        // === 3) Remplir gather buffer avec N items ===
+        // Libérer tous les held items du cycle précédent
+        for (int i = 0; i < held_count; i++) {
+            vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
         }
+        held_count = 0;
+        held_bytes = 0;
+
+        // Remplir gather_buf jusqu'à ~GATHER_BUF_SIZE (ou au moins 188*8)
+        gather_len = 0;
+        const size_t MIN_GATHER = 188 * 8;  // 8 paquets TS minimum (~1.5 KB)
+
+        while (gather_len + 188 <= GATHER_BUF_SIZE && held_count < MAX_HELD_ITEMS) {
+            size_t ilen = 0;
+            uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(20));
+            if (!it) break;
+
+            // Vérifier alignement TS 188-byte (temporaire debug)
+            if (ilen != 188) {
+                ESP_LOGW(TAG, "Item non-188 bytes: %zu (NOSPLIT échoué!)", ilen);
+                vRingbufferReturnItem(handle->ring_buffer, it);
+                continue;
+            }
+
+            // Copier dans gather_buf
+            memcpy(gather_buf + gather_len, it, ilen);
+            gather_len += ilen;
+
+            // Sauvegarder item pour libération ultérieure
+            held_items[held_count] = it;
+            held_count++;
+            held_bytes += ilen;
+
+            // Seuil max atteint (8-16 KB selon config)
+            if (gather_len >= GATHER_BUF_SIZE) break;
+        }
+
+        // Si pas assez de données, attendre
+        if (gather_len < MIN_GATHER) {
+            // [DIAG LAG] Détection d'underrun (buffer vide)
+            no_data_streak++;
+            if (no_data_streak == 10) {  // ~10 × (20ms wait + 20ms delay) = ~400ms
+                size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t filled = handle->buffer_size - free_size;
+                int level = (filled * 100) / handle->buffer_size;
+                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, held=%d items",
+                         gather_len, MIN_GATHER, level, held_count);
+                no_data_streak = 0;  // Reset pour éviter spam
+            }
+
+            // Rendre les items et attendre
+            for (int i = 0; i < held_count; i++) {
+                vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
+            }
+            held_count = 0;
+            held_bytes = 0;
+            gather_len = 0;
+
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        no_data_streak = 0;  // Reset sur succès
 
         // === 4) Préparer données pour décodage ===
-        uint8_t *decode_ptr;
-        size_t decode_len;
-
-        if (using_stitch) {
-            decode_ptr = stitch_buf;
-            decode_len = stitch_len;
-        } else {
-            decode_ptr = cur_item + cur_off;
-            decode_len = cur_len - cur_off;
-        }
+        uint8_t *decode_ptr = gather_buf;
+        size_t decode_len = gather_len;
 
         // === 5) Décoder ===
         esp_audio_simple_dec_raw_t raw = {
@@ -1086,123 +1258,71 @@ static void audio_play_task(void *pvParameters)
         dec_ret = esp_audio_simple_dec_process(dec_handle, &raw, &out_frame);
 
         if (decode_count++ < 20 || dec_ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu, cur_off=%zu/%zu%s",
-                     decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size,
-                     cur_off, cur_len, using_stitch ? " [STITCH]" : "");
+            ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu, held=%d items",
+                     decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size, held_count);
         }
 
-        // === 6) Avancer curseur selon consumed ===
-        if (raw.consumed > 0) {
+        // === 6) Libérer items consommés (sera fait au prochain cycle) ===
+        // NOTE: Les items sont gardés dans held_items[] et seront libérés au début
+        // du prochain cycle (section 3). Cela permet de gérer les cas consumed=0.
+
+        // Reset streak seulement si consumed > 0 et pas d'erreur
+        if (raw.consumed > 0 && dec_ret == ESP_AUDIO_ERR_OK) {
             zero_consume_streak = 0;
+        }
 
-            if (using_stitch) {
-                // Mode stitch : calculer avancement
-                size_t consumed = raw.consumed;
-                size_t consumed_from_next = 0;
-                size_t old_part = stitch_len - stitch_head_from_next;
-
-                if (consumed > old_part) {
-                    consumed_from_next = consumed - old_part;
-                }
-
-                // Avancer cur_off dans nouvel item
-                if (cur_item && consumed_from_next > 0) {
-                    cur_off += consumed_from_next;
-                    if (cur_off > cur_len) cur_off = cur_len;
-                }
-
-                // Revenir en mode normal
-                using_stitch = false;
-                stitch_len = 0;
-                stitch_head_from_next = 0;
+        // === 7) Resync si consumed==0 ou erreur ===
+        if (raw.consumed == 0 || dec_ret != ESP_AUDIO_ERR_OK) {
+            // Incrémenter streak seulement si vraiment consumed==0
+            if (raw.consumed == 0) {
+                zero_consume_streak++;
+                ESP_LOGW(TAG, "consumed=0 with gather_len=%zu (streak=%d)", gather_len, zero_consume_streak);
             } else {
-                // Mode normal : avancer curseur
-                cur_off += raw.consumed;
-                if (cur_off > cur_len) cur_off = cur_len;
+                // Erreur avec consumed>0 : resync ponctuel
+                ESP_LOGW(TAG, "Erreur décodeur (ret=%d) avec consumed=%lu, resync", dec_ret, raw.consumed);
             }
-        } else {
-            // === consumed == 0 : stratégie resync TS → stitch tail/head → fail-safe ===
-            zero_consume_streak++;
 
-            if (!using_stitch) {
-                // 6a) Tenter resync TS intelligent (PID+PUSI+CC) dans item courant
-                size_t skip = 0;
-                size_t avail = cur_len - cur_off;
+            // Tenter resync TS intelligent (PID+PUSI+PES) dans gather_buf
+            size_t skip = 0;
+            if (gather_len >= 188 * 3 && ts_resync_smart(gather_buf, gather_len, gather_len, 257, &skip)) {
+                // Resync réussi
+                if (skip > 0) {
+                    ESP_LOGI(TAG, "TS resync smart: skip %zu bytes (resync #%d)", skip, ++resync_count);
+                } else {
+                    ESP_LOGD(TAG, "TS resync smart: déjà aligné (skip=0)");
+                }
 
-                // Scanner TOUT le buffer avec validation protocole complète
-                if (ts_resync_smart(cur_item + cur_off, avail, avail, 257, &skip)) {
-                    // Resync réussi (skip peut être 0 si déjà aligné)
-                    if (skip > 0) {
-                        ESP_LOGD(TAG, "TS resync smart: skip %zu bytes", skip);
-                        cur_off += skip;
-                    } else {
-                        ESP_LOGD(TAG, "TS resync smart: déjà aligné (skip=0)");
-                    }
+                // Reset décodeur après resync
+                esp_audio_simple_dec_close(dec_handle);
+                dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
+                    ESP_LOGE(TAG, "Échec réouverture décodeur après resync");
+                    break;
+                }
 
-                    // Reset décodeur pour état propre après resync
-                    ESP_LOGD(TAG, "Reset décodeur après resync");
+                zero_consume_streak = 0;
+            } else {
+                // Resync échoué : fallback basique (chercher prochain 0x47 validé)
+                size_t s = 0;
+                if (ts_find_next_sync(gather_buf, gather_len, &s)) {
+                    ESP_LOGW(TAG, "Fallback resync: skip %zu bytes vers prochain 0x47", s);
+
+                    // Reset décodeur
                     esp_audio_simple_dec_close(dec_handle);
                     dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
                     if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
-                        ESP_LOGE(TAG, "Échec réouverture décodeur après resync");
+                        ESP_LOGE(TAG, "Échec réouverture décodeur après fallback resync");
                         break;
                     }
-
-                    zero_consume_streak = 0;
                 } else {
-                    // 6b) Resync échoué : stratégie selon position
-                    size_t remaining = cur_len - cur_off;
-
-                    if (remaining <= STITCH_TAIL_SIZE) {
-                        // Proche fin item → stitch tail+head
-                        memcpy(stitch_buf, cur_item + cur_off, remaining);
-                        stitch_len = remaining;
-
-                        // Libérer item courant
-                        vRingbufferReturnItem(handle->ring_buffer, cur_item);
-
-                        // Prendre next item
-                        cur_item = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &cur_len, pdMS_TO_TICKS(100));
-                        cur_off = 0;
-
-                        if (cur_item) {
-                            size_t to_add = (cur_len < STITCH_HEAD_SIZE) ? cur_len : STITCH_HEAD_SIZE;
-                            memcpy(stitch_buf + stitch_len, cur_item, to_add);
-                            stitch_len += to_add;
-
-                            stitch_head_from_next = to_add;
-                            cur_off = to_add;
-                            using_stitch = true;
-
-                            if (++stitch_count % 10 == 0) {
-                                ESP_LOGW(TAG, "[STITCH] Activation #%d (consumed=0, assembled %zu bytes)",
-                                         stitch_count, stitch_len);
-                            }
-                        } else {
-                            // Pas de next item, attendre
-                            stitch_len = 0;
-                            stitch_head_from_next = 0;
-                            vTaskDelay(pdMS_TO_TICKS(20));
-                        }
-                    } else {
-                        // 6c) Pas proche fin et pas de sync trouvé : skip 188 bytes (1 paquet TS)
-                        size_t step = (remaining > 188) ? 188 : remaining;
-                        cur_off += step;
-                    }
+                    ESP_LOGW(TAG, "Aucun sync trouvé dans gather_buf (%zu bytes)", gather_len);
                 }
-            } else {
-                // En mode stitch, si consumed==0, attendre
-                vTaskDelay(pdMS_TO_TICKS(20));
             }
 
-            // 6d) Anti-deadlock : reset si consumed==0 persiste
+            // Anti-deadlock : reset si consumed==0 persiste
             if (zero_consume_streak >= ZERO_CONSUME_MAX) {
                 ESP_LOGW(TAG, "consumed==0 persistant (%d), reset décodeur", zero_consume_streak);
                 zero_consume_streak = 0;
-
-                using_stitch = false;
-                stitch_len = 0;
-                stitch_head_from_next = 0;
 
                 esp_audio_simple_dec_close(dec_handle);
                 dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
@@ -1211,9 +1331,12 @@ static void audio_play_task(void *pvParameters)
                     break;
                 }
             }
+
+            // Attendre avant retry
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // === 7) Écriture audio ===
+        // === 8) Écriture audio ===
         if (dec_ret == ESP_AUDIO_ERR_OK && out_frame.decoded_size > 0) {
             // Réduction de volume logicielle (25%)
             int16_t *samples = (int16_t *)decoded_buffer;
@@ -1231,8 +1354,8 @@ static void audio_play_task(void *pvParameters)
             }
 
             if (decode_count % 100 == 0) {
-                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, cur_off=%zu/%zu, stitch=%zu)",
-                         bytes_written, decode_count, cur_off, cur_len, stitch_len);
+                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, gather=%zu bytes, held=%d items)",
+                         bytes_written, decode_count, gather_len, held_count);
             }
         } else if (dec_ret != ESP_AUDIO_ERR_OK) {
             // Erreur de décodage
@@ -1240,28 +1363,22 @@ static void audio_play_task(void *pvParameters)
                 ESP_LOGW(TAG, "Erreur décodage: ret=%d, consumed=%lu, decoded=%lu (count=%d)",
                          dec_ret, raw.consumed, out_frame.decoded_size, error_count);
             }
-
-            // Drop stitch si actif
-            if (using_stitch) {
-                ESP_LOGW(TAG, "Drop stitch buffer (%zu bytes) après erreur décodage", stitch_len);
-                stitch_len = 0;
-                stitch_head_from_next = 0;
-                using_stitch = false;
-            }
         }
     }
 
     // Cleanup
     esp_audio_simple_dec_close(dec_handle);
-    if (cur_item != NULL) {
-        vRingbufferReturnItem(handle->ring_buffer, cur_item);
+
+    // Libérer tous les held items
+    for (int i = 0; i < held_count; i++) {
+        vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
     }
-    free(stitch_buf);
+
+    free(gather_buf);
     free(decoded_buffer);
 
     ESP_LOGI(TAG, "Arrêt de la task de lecture audio");
-    ESP_LOGI(TAG, "[STATS ZC] Stitch utilisé %d fois (%.2f%% des %d cycles)",
-             stitch_count, (decode_count > 0) ? (stitch_count * 100.0f / decode_count) : 0.0f, decode_count);
+    ESP_LOGI(TAG, "[STATS GATHER] Resync count=%d, total decode cycles=%d", resync_count, decode_count);
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
@@ -1339,8 +1456,10 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
     handle->write_cb = config->write_cb;
     handle->write_ctx = config->write_ctx;
 
-    // Créer le ring buffer
-    handle->ring_buffer = xRingbufferCreate(buffer_size, RINGBUF_TYPE_BYTEBUF);
+    // Créer le ring buffer (NOSPLIT pour préserver alignement TS 188-byte)
+    // FIX: RINGBUF_TYPE_NOSPLIT garantit que chaque send = item atomique
+    // → pas de coupure arbitraire des paquets TS alignés 188-byte
+    handle->ring_buffer = xRingbufferCreate(buffer_size, RINGBUF_TYPE_NOSPLIT);
     if (handle->ring_buffer == NULL) {
         ESP_LOGE(TAG, "Échec de création du ring buffer");
         free(handle->stream_url);
@@ -1422,6 +1541,7 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     handle->target_duration = 0;
     handle->drop_count = 0;
     handle->drop_old_count = 0;
+    handle->ts_carry_len = 0;  // Reset carry pour alignement TS
 
     // Signal initial pour déclencher le premier téléchargement
     xSemaphoreGive(handle->download_semaphore);

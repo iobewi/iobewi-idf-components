@@ -41,12 +41,21 @@ static bool s_wifi_connected = false;
  * @brief Callback d'écriture audio pour app_hls_player
  *
  * Ce callback reçoit les données PCM décodées et les envoie au driver MAX98357A
+ * Applique une réduction de volume numérique (-6dB, divise par 2)
  */
 static esp_err_t audio_write_callback(void *user_ctx, const void *data,
                                        size_t size, size_t *bytes_written,
                                        uint32_t timeout_ms)
 {
     drv_max98357a_t *driver = (drv_max98357a_t *)user_ctx;
+
+    // Réduction volume numérique : diviser amplitude par 2 (-6dB)
+    int16_t *samples = (int16_t *)data;
+    size_t sample_count = size / sizeof(int16_t);
+    for (size_t i = 0; i < sample_count; i++) {
+        samples[i] = samples[i] / 4;
+    }
+
     return drv_max98357a_write(driver, data, size, bytes_written, timeout_ms);
 }
 

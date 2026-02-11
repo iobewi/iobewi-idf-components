@@ -24,4 +24,20 @@ menu "HLS Player Configuration"
             Default 16 KB is sufficient for most cases (48kHz stereo).
             Only increase if you experience audio glitches with high sample rates.
 
+    config APP_HLS_PLAYER_GATHER_BUFFER_SIZE
+        int "Gather buffer size (KB)"
+        default 8
+        range 4 16
+        help
+            Size of the gather buffer for assembling TS packets before decoding.
+
+            The decoder needs a contiguous window of several KB to extract AAC frames.
+            Items in the ring buffer are 188 bytes (1 TS packet), but the decoder
+            needs 4-8 KB to work efficiently.
+
+            Recommended values:
+            - 4 KB: minimum, ~21 TS packets
+            - 8 KB: optimal for most streams, ~42 TS packets
+            - 16 KB: maximum, use only if experiencing frequent decode errors
+
 endmenu

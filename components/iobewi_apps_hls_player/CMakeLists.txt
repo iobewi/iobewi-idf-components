@@ -9,4 +9,5 @@ idf_component_register(
         esp_audio_codec
         mbedtls
         esp_ringbuf
+        esp_timer
 )
