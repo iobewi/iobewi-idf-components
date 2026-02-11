@@ -35,6 +35,7 @@ static const char *TAG = "hls_stream_app";
 #define AUDIO_SAMPLE_RATE   CONFIG_AUDIO_SAMPLE_RATE
 
 static int s_wifi_retry_num = 0;
+static bool s_wifi_connected = false;
 
 /**
  * @brief Callback d'écriture audio pour app_hls_player
@@ -69,6 +70,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "WiFi connecté, IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_wifi_retry_num = 0;
+        s_wifi_connected = true;  // Signal de connexion réussie
     }
 }
 
@@ -111,12 +113,13 @@ static esp_err_t init_wifi(void)
 
     // Attendre la connexion (max 30 secondes)
     int wait_time = 0;
-    while (s_wifi_retry_num < WIFI_MAX_RETRY && wait_time < 30) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    while (!s_wifi_connected && s_wifi_retry_num < WIFI_MAX_RETRY && wait_time < 30) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // Check toutes les 100ms (pas 1s)
         wait_time++;
     }
 
-    if (s_wifi_retry_num >= WIFI_MAX_RETRY) {
+    if (!s_wifi_connected) {
+        ESP_LOGE(TAG, "Timeout connexion WiFi (%d secondes)", wait_time / 10);
         return ESP_FAIL;
     }
 
@@ -180,7 +183,7 @@ void app_main(void)
     app_hls_player_config_t player_cfg;
     app_hls_player_config_init(&player_cfg);
     player_cfg.stream_url = HLS_STREAM_URL;
-    player_cfg.buffer_size = 100 * 1024;  // 100 KB
+    // buffer_size = 0 → utilise CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE du Kconfig
     player_cfg.write_cb = audio_write_callback;
     player_cfg.write_ctx = driver;  // Passer le driver comme contexte
 

@@ -12,3 +12,5 @@ managed_components
 # Documentation générée (Doxygen)
 docs/doxygen/
 .claude
+
+*.log
