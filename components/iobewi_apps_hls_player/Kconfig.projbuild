@@ -1,0 +1,27 @@
+menu "HLS Player Configuration"
+
+    config APP_HLS_PLAYER_RING_BUFFER_SIZE
+        int "Ring buffer size (KB)"
+        default 128 if SPIRAM
+        default 64 if !SPIRAM
+        range 32 256
+        help
+            Size of the ring buffer for streaming data in KB.
+
+            Recommended values:
+            - With PSRAM: 128-256 KB (better resilience to jitter)
+            - Without PSRAM: 64-96 KB (balance RAM/stability)
+
+            Larger buffer = more latency but more resilient to network jitter.
+
+    config APP_HLS_PLAYER_DEC_BUFFER_SIZE
+        int "Decoded buffer size (KB)"
+        default 16
+        range 8 32
+        help
+            Size of the output PCM buffer in KB.
+
+            Default 16 KB is sufficient for most cases (48kHz stereo).
+            Only increase if you experience audio glitches with high sample rates.
+
+endmenu
