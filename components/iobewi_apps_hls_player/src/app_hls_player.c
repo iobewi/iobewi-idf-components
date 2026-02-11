@@ -1057,10 +1057,11 @@ static void audio_play_task(void *pvParameters)
     // Gather buffer (accumule N items de 188 avant décodage)
     uint8_t *gather_buf = malloc(GATHER_BUF_SIZE);
     size_t gather_len = 0;
+    size_t leftover_len = 0;  // Bytes déjà dans gather_buf à conserver entre cycles
 
     // File d'items "en attente de retour" (held items)
-    // NOTE: Tous les items font 188 bytes (NOSPLIT), pas besoin de held_lens[]
     uint8_t *held_items[MAX_HELD_ITEMS];
+    size_t  held_lens[MAX_HELD_ITEMS];  // Taille de chaque item (normalement 188)
     int held_count = 0;
     size_t held_bytes = 0;  // Total bytes dans held
 
@@ -1123,6 +1124,7 @@ static void audio_play_task(void *pvParameters)
 
                 // Reset gather state
                 gather_len = 0;
+                leftover_len = 0;  // Flush leftover
                 held_count = 0;
                 held_bytes = 0;
 
@@ -1174,17 +1176,11 @@ static void audio_play_task(void *pvParameters)
             download_signaled = false;
         }
 
-        // === 3) Remplir gather buffer avec N items ===
-        // Libérer tous les held items du cycle précédent
-        for (int i = 0; i < held_count; i++) {
-            vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
-        }
-        held_count = 0;
-        held_bytes = 0;
-
-        // Remplir gather_buf jusqu'à ~GATHER_BUF_SIZE (ou au moins 188*8)
-        gather_len = 0;
-        const size_t MIN_GATHER = 188 * 8;  // 8 paquets TS minimum (~1.5 KB)
+        // === 3) Remplir gather buffer avec N items (en gardant leftover) ===
+        // Remplir gather_buf jusqu'à ~GATHER_BUF_SIZE (ou au moins MIN_GATHER)
+        // FIX: Respecter leftover_len (bytes déjà présents à conserver)
+        gather_len = leftover_len;
+        const size_t MIN_GATHER = 188 * 16;  // 16 paquets TS minimum (~3 KB)
 
         while (gather_len + 188 <= GATHER_BUF_SIZE && held_count < MAX_HELD_ITEMS) {
             size_t ilen = 0;
@@ -1198,12 +1194,13 @@ static void audio_play_task(void *pvParameters)
                 continue;
             }
 
-            // Copier dans gather_buf
+            // Copier dans gather_buf APRÈS leftover
             memcpy(gather_buf + gather_len, it, ilen);
             gather_len += ilen;
 
             // Sauvegarder item pour libération ultérieure
             held_items[held_count] = it;
+            held_lens[held_count] = ilen;
             held_count++;
             held_bytes += ilen;
 
@@ -1219,18 +1216,19 @@ static void audio_play_task(void *pvParameters)
                 size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
                 size_t filled = handle->buffer_size - free_size;
                 int level = (filled * 100) / handle->buffer_size;
-                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, held=%d items",
-                         gather_len, MIN_GATHER, level, held_count);
+                ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes (leftover=%zu), buffer=%d%%, held=%d items",
+                         gather_len, MIN_GATHER, leftover_len, level, held_count);
                 no_data_streak = 0;  // Reset pour éviter spam
             }
 
-            // Rendre les items et attendre
+            // IMPORTANT: Rollback - rendre les items qu'on vient de prendre,
+            // mais ne pas toucher au leftover (déjà dans gather_buf)
             for (int i = 0; i < held_count; i++) {
                 vRingbufferReturnItem(handle->ring_buffer, held_items[i]);
             }
             held_count = 0;
             held_bytes = 0;
-            gather_len = 0;
+            gather_len = leftover_len;  // Revenir au leftover
 
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
@@ -1262,13 +1260,67 @@ static void audio_play_task(void *pvParameters)
                      decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size, held_count);
         }
 
-        // === 6) Libérer items consommés (sera fait au prochain cycle) ===
-        // NOTE: Les items sont gardés dans held_items[] et seront libérés au début
-        // du prochain cycle (section 3). Cela permet de gérer les cas consumed=0.
+        // === 6) Appliquer consumed: libérer items et créer leftover ===
+        // FIX CRITIQUE: Ne libérer QUE les items entièrement consommés,
+        // et garder le reste comme leftover pour le prochain cycle
+        if (raw.consumed > 0) {
+            size_t to_consume = raw.consumed;
 
-        // Reset streak seulement si consumed > 0 et pas d'erreur
-        if (raw.consumed > 0 && dec_ret == ESP_AUDIO_ERR_OK) {
-            zero_consume_streak = 0;
+            // a) Consommer d'abord dans leftover existant (bytes avant held_items)
+            if (leftover_len > 0) {
+                size_t c = (to_consume < leftover_len) ? to_consume : leftover_len;
+                to_consume -= c;
+                leftover_len -= c;
+
+                if (leftover_len > 0) {
+                    // Il reste du leftover non consommé: décaler au début
+                    memmove(gather_buf, gather_buf + c, leftover_len);
+                } else {
+                    leftover_len = 0;
+                }
+            }
+
+            // b) Libérer des items 188 entièrement consommés
+            int release_count = 0;
+            while (to_consume >= 188 && release_count < held_count) {
+                vRingbufferReturnItem(handle->ring_buffer, held_items[release_count]);
+                to_consume -= held_lens[release_count];
+                release_count++;
+            }
+
+            // c) Gérer consumed non multiple de 188 (rare mais possible)
+            if (to_consume > 0 && to_consume < 188) {
+                ESP_LOGW(TAG, "consumed non multiple de 188: %zu bytes (leftover forced)", to_consume);
+                // On garde le reste de l'item partiellement consommé comme leftover
+            }
+
+            // d) Recompacter held_items[] (retirer ceux relâchés)
+            if (release_count > 0) {
+                for (int i = release_count; i < held_count; i++) {
+                    held_items[i - release_count] = held_items[i];
+                    held_lens[i - release_count] = held_lens[i];
+                }
+                held_count -= release_count;
+                held_bytes -= (release_count * 188);
+            }
+
+            // e) Construire nouveau leftover = (gather_len - raw.consumed)
+            size_t remaining = (raw.consumed < gather_len) ? (gather_len - raw.consumed) : 0;
+            if (remaining > 0) {
+                memmove(gather_buf, gather_buf + raw.consumed, remaining);
+                leftover_len = remaining;
+            } else {
+                leftover_len = 0;
+            }
+
+            // Reset streak seulement si consumed > 0 et pas d'erreur
+            if (dec_ret == ESP_AUDIO_ERR_OK) {
+                zero_consume_streak = 0;
+            }
+        } else {
+            // consumed == 0 : ne rien libérer, conserver gather_buf tel quel comme leftover
+            // pour retry au prochain cycle
+            leftover_len = gather_len;
         }
 
         // === 7) Resync si consumed==0 ou erreur ===
@@ -1276,53 +1328,71 @@ static void audio_play_task(void *pvParameters)
             // Incrémenter streak seulement si vraiment consumed==0
             if (raw.consumed == 0) {
                 zero_consume_streak++;
-                ESP_LOGW(TAG, "consumed=0 with gather_len=%zu (streak=%d)", gather_len, zero_consume_streak);
+                ESP_LOGW(TAG, "consumed=0 with gather_len=%zu, leftover=%zu (streak=%d)",
+                         gather_len, leftover_len, zero_consume_streak);
             } else {
                 // Erreur avec consumed>0 : resync ponctuel
                 ESP_LOGW(TAG, "Erreur décodeur (ret=%d) avec consumed=%lu, resync", dec_ret, raw.consumed);
             }
 
-            // Tenter resync TS intelligent (PID+PUSI+PES) dans gather_buf
+            // Tenter resync TS intelligent (PID+PUSI+PES) dans leftover
             size_t skip = 0;
-            if (gather_len >= 188 * 3 && ts_resync_smart(gather_buf, gather_len, gather_len, 257, &skip)) {
+            bool resync_ok = false;
+
+            if (leftover_len >= 188 * 3 && ts_resync_smart(gather_buf, leftover_len, leftover_len, 257, &skip)) {
                 // Resync réussi
                 if (skip > 0) {
                     ESP_LOGI(TAG, "TS resync smart: skip %zu bytes (resync #%d)", skip, ++resync_count);
+
+                    // FIX CRITIQUE: APPLIQUER le skip dans leftover
+                    if (skip < leftover_len) {
+                        memmove(gather_buf, gather_buf + skip, leftover_len - skip);
+                        leftover_len -= skip;
+                    } else {
+                        // Skip >= leftover : vider leftover
+                        leftover_len = 0;
+                    }
                 } else {
                     ESP_LOGD(TAG, "TS resync smart: déjà aligné (skip=0)");
                 }
+                resync_ok = true;
+            } else {
+                // Resync smart échoué : fallback basique (chercher prochain 0x47 validé)
+                size_t s = 0;
+                if (leftover_len >= 188 * 2 && ts_find_next_sync(gather_buf, leftover_len, &s)) {
+                    ESP_LOGW(TAG, "Fallback resync: skip %zu bytes vers prochain 0x47", s);
 
-                // Reset décodeur après resync
+                    // FIX CRITIQUE: APPLIQUER le skip
+                    if (s < leftover_len) {
+                        memmove(gather_buf, gather_buf + s, leftover_len - s);
+                        leftover_len -= s;
+                    } else {
+                        leftover_len = 0;
+                    }
+                    resync_ok = true;
+                } else {
+                    ESP_LOGW(TAG, "Aucun sync trouvé dans leftover (%zu bytes)", leftover_len);
+                    // Pas de sync trouvé : vider leftover (données corrompues)
+                    leftover_len = 0;
+                }
+            }
+
+            // Reset décodeur après resync (seulement si resync réussi)
+            if (resync_ok) {
                 esp_audio_simple_dec_close(dec_handle);
                 dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
                 if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
                     ESP_LOGE(TAG, "Échec réouverture décodeur après resync");
                     break;
                 }
-
                 zero_consume_streak = 0;
-            } else {
-                // Resync échoué : fallback basique (chercher prochain 0x47 validé)
-                size_t s = 0;
-                if (ts_find_next_sync(gather_buf, gather_len, &s)) {
-                    ESP_LOGW(TAG, "Fallback resync: skip %zu bytes vers prochain 0x47", s);
-
-                    // Reset décodeur
-                    esp_audio_simple_dec_close(dec_handle);
-                    dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
-                    if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
-                        ESP_LOGE(TAG, "Échec réouverture décodeur après fallback resync");
-                        break;
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Aucun sync trouvé dans gather_buf (%zu bytes)", gather_len);
-                }
             }
 
             // Anti-deadlock : reset si consumed==0 persiste
             if (zero_consume_streak >= ZERO_CONSUME_MAX) {
-                ESP_LOGW(TAG, "consumed==0 persistant (%d), reset décodeur", zero_consume_streak);
+                ESP_LOGW(TAG, "consumed==0 persistant (%d), reset décodeur + flush leftover", zero_consume_streak);
                 zero_consume_streak = 0;
+                leftover_len = 0;  // Flush leftover (données probablement corrompues)
 
                 esp_audio_simple_dec_close(dec_handle);
                 dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
@@ -1354,8 +1424,8 @@ static void audio_play_task(void *pvParameters)
             }
 
             if (decode_count % 100 == 0) {
-                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, gather=%zu bytes, held=%d items)",
-                         bytes_written, decode_count, gather_len, held_count);
+                ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, gather=%zu bytes, leftover=%zu, held=%d items)",
+                         bytes_written, decode_count, gather_len, leftover_len, held_count);
             }
         } else if (dec_ret != ESP_AUDIO_ERR_OK) {
             // Erreur de décodage
