@@ -802,8 +802,21 @@ static bool ts_resync_smart(const uint8_t *buf,
     size_t n = (len < scan_max) ? len : scan_max;
     if (n < 188 * 3) return false; // Besoin 3 paquets TS minimum
 
+    // Compteurs debug (static pour garder entre appels)
+    static int dbg_sync_found = 0;
+    static int dbg_pid_ok = 0;
+    static int dbg_pusi_ok = 0;
+    static int dbg_afc_ok = 0;
+    static int dbg_pes_ok = 0;
+    static int dbg_cc_ok = 0;
+    static int dbg_calls = 0;
+
+    dbg_calls++;
+    bool log_stats = (dbg_calls % 10 == 0); // Log tous les 10 appels
+
     for (size_t i = 0; i + 188 * 2 < n; i++) {
         if (buf[i] != 0x47) continue;
+        dbg_sync_found++;
 
         // Parse header TS
         uint8_t b1 = buf[i + 1];
@@ -817,8 +830,13 @@ static bool ts_resync_smart(const uint8_t *buf,
 
         // Filtres PID + PUSI + payload
         if (pid != audio_pid) continue;
+        dbg_pid_ok++;
+
         if (!pusi) continue;
+        dbg_pusi_ok++;
+
         if (afc != 1 && afc != 3) continue; // Payload requis
+        dbg_afc_ok++;
 
         // Compute payload start (skip adaptation field si présent)
         size_t p = i + 4;
@@ -832,19 +850,33 @@ static bool ts_resync_smart(const uint8_t *buf,
         if (!(buf[p] == 0x00 && buf[p+1] == 0x00 && buf[p+2] == 0x01)) {
             continue;
         }
+        dbg_pes_ok++;
 
-        // Valider next 2 packets : sync + CC continuity (anti faux-positifs)
+        // Valider next 2 packets : sync bytes seulement (pas CC car discontinuités légitimes)
         const uint8_t *p1 = buf + i + 188;
         const uint8_t *p2 = buf + i + 376;
         if (p1[0] != 0x47 || p2[0] != 0x47) continue;
 
-        uint8_t cc1 = p1[3] & 0x0F;
-        uint8_t cc2 = p2[3] & 0x0F;
-        if (((cc0 + 1) & 0x0F) != cc1) continue;
-        if (((cc1 + 1) & 0x0F) != cc2) continue;
+        // CC validation DÉSACTIVÉE : trop stricte, discontinuités légitimes possibles
+        // uint8_t cc1 = p1[3] & 0x0F;
+        // uint8_t cc2 = p2[3] & 0x0F;
+        // if (((cc0 + 1) & 0x0F) != cc1) continue;
+        // if (((cc1 + 1) & 0x0F) != cc2) continue;
+        dbg_cc_ok++;  // Compter comme succès (validation désactivée)
 
         *out_skip = i;
+
+        if (log_stats) {
+            ESP_LOGW(TAG, "[RESYNC DEBUG] Appels=%d, Sync=0x47:%d, PID:%d, PUSI:%d, AFC:%d, PES:%d, CC:%d, SUCCESS:%d",
+                     dbg_calls, dbg_sync_found, dbg_pid_ok, dbg_pusi_ok, dbg_afc_ok, dbg_pes_ok, dbg_cc_ok, dbg_cc_ok);
+        }
+
         return true;
+    }
+
+    if (log_stats) {
+        ESP_LOGW(TAG, "[RESYNC DEBUG] Appels=%d, Sync=0x47:%d, PID:%d, PUSI:%d, AFC:%d, PES:%d, CC:%d, ÉCHEC",
+                 dbg_calls, dbg_sync_found, dbg_pid_ok, dbg_pusi_ok, dbg_afc_ok, dbg_pes_ok, dbg_cc_ok);
     }
 
     return false;
@@ -1153,9 +1185,9 @@ static void audio_play_task(void *pvParameters)
                             vTaskDelay(pdMS_TO_TICKS(20));
                         }
                     } else {
-                        // 6c) Pas proche fin et pas de sync trouvé : abandonner cet item
-                        ESP_LOGW(TAG, "TS resync échoué, abandon item (%zu bytes restants)", remaining);
-                        cur_off = cur_len;  // Force libération et passage au prochain item
+                        // 6c) Pas proche fin et pas de sync trouvé : skip 188 bytes (1 paquet TS)
+                        size_t step = (remaining > 188) ? 188 : remaining;
+                        cur_off += step;
                     }
                 }
             } else {
