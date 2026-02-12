@@ -184,15 +184,19 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     // Créer les tâches
     // Core pinning : fetch sur CPU0 (Wi-Fi/TLS), play sur CPU1 (isolation audio)
     // NOTE: xTaskCreatePinnedToCore() attend usStackDepth en WORDS (pas bytes)
-    // Sur Xtensa: 1 word = 4 bytes, donc 14336 words = 57 KB, 6144 words = 24 KB
+    // Sur Xtensa: 1 word = 4 bytes, donc 11264 words = 44 KB, 4096 words = 16 KB
     // IMPORTANT: Vérifier sizeof(StackType_t) dans les logs HWM pour confirmation
-    BaseType_t ret = xTaskCreatePinnedToCore(hls_fetch_task, "hls_fetch", 14336, handle, 5, &handle->fetch_task, 0);
+    //
+    // [P0.1 PHASE 1 - Conservative] Baseline HWM: fetch=7000w, audio=3584w
+    // Calcul safe: fetch 14336→11264 (-12KB), audio 6144→4096 (-8KB)
+    // Gain Phase 1: -20 KB RAM | Marge: >35%
+    BaseType_t ret = xTaskCreatePinnedToCore(hls_fetch_task, "hls_fetch", 11264, handle, 5, &handle->fetch_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de téléchargement");
         return ESP_FAIL;
     }
 
-    ret = xTaskCreatePinnedToCore(hls_audio_play_task, "audio_play", 6144, handle, 8, &handle->play_task, 1);
+    ret = xTaskCreatePinnedToCore(hls_audio_play_task, "audio_play", 4096, handle, 8, &handle->play_task, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de lecture");
         // FIX CRITIQUE: Ne pas vTaskDelete brutal (peut laisser stack HTTP sale)

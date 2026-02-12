@@ -368,9 +368,10 @@ task_exit:
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
+    const size_t FETCH_STACK_SIZE = 11264;  // words (from xTaskCreate - P0.1 Phase 1)
     ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
              pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
-             14336 - (hwm_final * sizeof(StackType_t)));
+             (FETCH_STACK_SIZE * sizeof(StackType_t)) - (hwm_final * sizeof(StackType_t)));
 
     // Signaler fin de tâche via sémaphore
     if (handle->fetch_done) {

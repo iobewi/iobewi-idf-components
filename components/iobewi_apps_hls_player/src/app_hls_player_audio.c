@@ -508,9 +508,10 @@ void hls_audio_play_task(void *pvParameters)
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
+    const size_t AUDIO_STACK_SIZE = 4096;  // words (from xTaskCreate - P0.1 Phase 1)
     ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
              pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
-             6144 - (hwm_final * sizeof(StackType_t)));
+             (AUDIO_STACK_SIZE * sizeof(StackType_t)) - (hwm_final * sizeof(StackType_t)));
 
     // FIX: Signaler fin de tâche via sémaphore (guard pour robustesse future)
     if (handle->play_done) {
