@@ -157,32 +157,26 @@ void hls_audio_play_task(void *pvParameters)
                 #endif
                 const uint16_t AUDIO_PID = CONFIG_APP_HLS_PLAYER_AUDIO_PID;
 
-                // [FIX] Solution hybride A+B+D : max_drop élevé + fallback "any PES" (filtré PSI)
-                // Tentative 1 : PUSI sur PID audio spécifique (max 150 items = ~28 KB)
-                // Augmenté de 50 → 150 pour survivre aux drop-old massifs (x100, x200)
-                const int RESYNC_MAX_DROP_PID = 150;
-                const int RESYNC_MAX_DROP_ANY = 250;  // Fallback : any PES (00 00 01), rejette PSI (~47 KB)
-                const uint16_t ANY_PID = 0x0000;      // Special value : mode "any PES" (rejette PAT/PMT)
+                // [FIX] Solution F3 : NOTIF_RESYNC cherche uniquement PID audio, pas de fallback "any PES"
+                // Justification : Si PID audio pas trouvé dans 150 items après drop-old massif,
+                //   mieux vaut NOTIF_RESET complet (drop+reset AAC) que fallback PID incorrect
+                //   qui sera rejeté par garde-fou → gap audio ~700ms
+                // NOTIF_RESET recovery ~200-300ms (vs ~700ms avec rejection)
+                const int RESYNC_MAX_DROP_PID = 150;  // Max 150 items = ~28 KB scan
 
                 hls_held_ts_packet_t held_pkt = {0};
                 int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_PID, AUDIO_PID, &held_pkt);
 
                 if (drop_count < 0) {
-                    // Tentative 2 : n'importe quel PES (fallback robuste, filtre PSI)
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items, fallback any PES (filtre PSI)",
+                    // Échec : PUSI audio non trouvé dans 150 items
+                    // → Trigger NOTIF_RESET complet (plus efficace que fallback PID incorrect)
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items → fallback NOTIF_RESET complet",
                              AUDIO_PID, RESYNC_MAX_DROP_PID);
-                    drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_ANY, ANY_PID, &held_pkt);
-                }
-
-                if (drop_count < 0) {
-                    // Échec total : aucun PES trouvé (même any PES filtré)
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: aucun PES trouvé dans %d items, fallback NOTIF_RESET", RESYNC_MAX_DROP_ANY);
-                    // Trigger reset complet (flush + recréer décodeur + drop massif)
+                    // Trigger reset complet (flush + recréer décodeur + drop-until-PUSI)
                     notif |= NOTIF_RESET;  // Forcer traitement NOTIF_RESET ci-dessous
                 } else {
-                    const char *pid_mode = (held_pkt.pid == AUDIO_PID) ? "audio" : "any_pes";
-                    ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI (PID=0x%04X, mode=%s)",
-                             drop_count, held_pkt.pid, pid_mode);
+                    ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI audio (PID=0x%04X)",
+                             drop_count, held_pkt.pid);
 
                     // ORDRE CRITIQUE : Calculer should_reset_aac AVANT de reset les états
                     bool should_reset_aac = (drop_count > 5) || (zero_consume_streak > 3);
@@ -195,14 +189,16 @@ void hls_audio_play_task(void *pvParameters)
                     hls_ts_parser_reset();  // Reset explicite état TS/PES (noop actuellement, future-proof)
 
                     // Injecter le paquet PUSI held dans gather_buf (début PES propre)
-                    // GARDE-FOU : N'injecter QUE si PID audio (sinon PSI/PMT → corruption)
+                    // GARDE-FOU : Validation PID audio (défense en profondeur, ne devrait jamais trigger)
                     if (held_pkt.has_packet) {
                         if (held_pkt.pid == AUDIO_PID) {
                             memcpy(gather_buf, held_pkt.data, 188);
                             gather_len = 188;
                             ESP_LOGD(TAG, "NOTIF_RESYNC: paquet PUSI audio injecté dans gather_buf (188 bytes)");
                         } else {
-                            ESP_LOGW(TAG, "NOTIF_RESYNC: held_pkt PID=0x%04X not audio (0x%04X) → NOT injected, gather_len=0",
+                            // NE DEVRAIT JAMAIS ARRIVER (fallback any PES désactivé)
+                            // Gardé pour défense en profondeur si bug futur
+                            ESP_LOGE(TAG, "NOTIF_RESYNC: BUG! held_pkt PID=0x%04X not audio (0x%04X) → NOT injected",
                                      held_pkt.pid, AUDIO_PID);
                             // gather_len reste 0 → force refill ou reset au prochain cycle
                         }
