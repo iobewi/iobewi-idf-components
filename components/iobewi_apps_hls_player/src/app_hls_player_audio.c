@@ -157,12 +157,13 @@ void hls_audio_play_task(void *pvParameters)
                 #endif
                 const uint16_t AUDIO_PID = CONFIG_APP_HLS_PLAYER_AUDIO_PID;
 
-                // [FIX] Solution G1 : Augmenter RESYNC_MAX_DROP_PID pour trouver audio directement
+                // [FIX] Solution G1+ : Augmenter RESYNC_MAX_DROP_PID pour trouver audio directement
                 // Justification : Logs montrent PID audio trouvé à l'item 156 (150+6) après drop-old
                 //   NOTIF_RESYNC s'arrête à 150 → fallback NOTIF_RESET → gap 2.2s ❌
-                //   Si scan jusqu'à 250 items → trouve audio directement → gap ~400ms ✅
+                //   Si scan jusqu'à 300 items → trouve audio directement → gap ~400ms ✅
                 // Évite fallback NOTIF_RESET qui vide encore plus le ringbuffer
-                const int RESYNC_MAX_DROP_PID = 250;  // Max 250 items = ~47 KB scan (augmenté de 150)
+                // 300 items = 56 KB scan (OK avec ringbuffer 256 KB), couvre cas "audio après PMT burst"
+                const int RESYNC_MAX_DROP_PID = 300;  // Max 300 items = ~56 KB scan (augmenté de 150)
 
                 hls_held_ts_packet_t held_pkt = {0};
                 int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_PID, AUDIO_PID, &held_pkt);
