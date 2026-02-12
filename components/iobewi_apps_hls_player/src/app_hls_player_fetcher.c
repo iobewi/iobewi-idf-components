@@ -178,7 +178,7 @@ void hls_fetch_task(void *pvParameters)
         if (playlist.is_master_playlist && playlist.variant_count > 0) {
             ESP_LOGI(TAG, "Master playlist détectée, sélection de la meilleure qualité...");
 
-            // Politique: midfi > hifi > lofi (par nom OU par bandwidth)
+            // Politique: hifi > midfi > lofi (par nom OU par bandwidth)
             int idx_selected = -1;
             uint32_t best_bandwidth = 0;  // P1: bandwidth en kbps (uint32_t)
 
@@ -195,13 +195,13 @@ void hls_fetch_task(void *pvParameters)
                 }
             }
 
-            // Sélection par nom (préféré)
-            if (idx_midfi >= 0) {
-                idx_selected = idx_midfi;
-                ESP_LOGI(TAG, "Qualité MIDFI sélectionnée (~128 kbps)");
-            } else if (idx_hifi >= 0) {
+            // Sélection par nom (préféré) : HIFI PRIORITAIRE
+            if (idx_hifi >= 0) {
                 idx_selected = idx_hifi;
                 ESP_LOGI(TAG, "Qualité HIFI sélectionnée (~192-320 kbps)");
+            } else if (idx_midfi >= 0) {
+                idx_selected = idx_midfi;
+                ESP_LOGI(TAG, "Qualité MIDFI sélectionnée (~128 kbps)");
             } else if (idx_lofi >= 0) {
                 idx_selected = idx_lofi;
                 ESP_LOGI(TAG, "Qualité LOFI sélectionnée (~64 kbps)");
