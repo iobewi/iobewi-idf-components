@@ -1,0 +1,26 @@
+menu "HLS Test Configuration"
+
+    choice HLS_TEST_MODE
+        prompt "Test mode"
+        default HLS_TEST_SIMPLE_RUN
+        help
+            Select which test to run.
+
+        config HLS_TEST_SIMPLE_RUN
+            bool "Simple run (60s)"
+        config HLS_TEST_START_STOP_CYCLES
+            bool "Start/Stop cycles (3x 30s)"
+        config HLS_TEST_LONG_RUN
+            bool "Long run (configurable duration)"
+    endchoice
+
+    config HLS_TEST_LONG_RUN_DURATION_S
+        int "Long run duration (seconds)"
+        depends on HLS_TEST_LONG_RUN
+        default 600
+        range 60 7200
+        help
+            Duration in seconds for long-run test.
+            Recommended: 600s (10 min) for stack HWM baseline, 3600s (1h) for stability.
+
+endmenu

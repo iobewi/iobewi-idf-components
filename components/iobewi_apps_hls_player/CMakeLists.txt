@@ -1,7 +1,12 @@
 idf_component_register(
-    SRCS "src/app_hls_player.c"
+    SRCS
+        "src/app_hls_player.c"
+        "src/app_hls_player_ts_sync.c"
+        "src/app_hls_player_http.c"
+        "src/app_hls_player_audio.c"
+        "src/app_hls_player_fetcher.c"
     INCLUDE_DIRS "include"
-    REQUIRES
+    PRIV_REQUIRES
         esp_common
         esp_http_client
         esp_https_ota

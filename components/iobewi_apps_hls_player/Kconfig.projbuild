@@ -40,4 +40,25 @@ menu "HLS Player Configuration"
             - 8 KB: optimal for most streams, ~42 TS packets
             - 16 KB: maximum, use only if experiencing frequent decode errors
 
+    config APP_HLS_PLAYER_DROP_OLD_ON_FULL
+        bool "Enable drop-old strategy when ring buffer full"
+        default y
+        help
+            When enabled, if the ring buffer is full, the oldest items are dropped
+            until a PUSI boundary (PES start) is found, then the new data is inserted.
+
+            This maintains live-ness for streaming (drop old data rather than block).
+            Disable only for testing or if you need strict packet ordering.
+
+    config APP_HLS_PLAYER_STACK_DIAG
+        bool "Enable stack diagnostics (HWM logging)"
+        default n
+        help
+            Enable periodic stack High Water Mark (HWM) logging for fetch and audio tasks.
+
+            When enabled, logs HWM every 5 seconds (debug level) to help identify
+            optimal stack sizes for P0.1 stack reduction.
+
+            Disable in production to avoid log spam.
+
 endmenu
