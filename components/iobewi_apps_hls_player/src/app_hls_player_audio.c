@@ -296,11 +296,12 @@ void hls_audio_play_task(void *pvParameters)
             // Starvation temporaire (pas forcément audible)
             no_data_streak++;
 
-            // [FIX UNDERRUN] Receive secours 25ms si buffer >= 40% et items=0
-            // Évite faux positifs pendant refresh M3U8 (jitter scheduling)
+            // [FIX UNDERRUN] Receive secours 100ms si buffer >= 40% et items=0
+            // Évite faux positifs pendant refresh M3U8 (jusqu'à 400ms TLS/HTTP)
+            // Timeout 100ms permet d'attendre fin du refresh sans bloquer trop
             if (items_copied == 0 && buffer_level >= 40 && no_data_streak < 10) {
                 size_t ilen = 0;
-                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(25));
+                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(100));
                 if (it) {
                     if (ilen == 188 && gather_len + 188 <= GATHER_BUF_SIZE) {
                         memcpy(gather_buf + gather_len, it, 188);
