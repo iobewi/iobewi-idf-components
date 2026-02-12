@@ -106,10 +106,12 @@ bool hls_ts_find_next_sync(const uint8_t *buf, size_t len, size_t *out_skip)
 int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
                                uint16_t audio_pid, hls_held_ts_packet_t *out_held)
 {
-    if (ring_buffer == NULL || max_drop <= 0 || audio_pid == 0) {
-        ESP_LOGE(TAG, "drop_until_pusi: params invalides (audio_pid doit être != 0)");
+    if (ring_buffer == NULL || max_drop <= 0) {
+        ESP_LOGE(TAG, "drop_until_pusi: params invalides");
         return -1;
     }
+
+    // audio_pid == 0 est valide : signifie "accepter n'importe quel PUSI" (fallback robuste)
     
     // Init out_held
     if (out_held != NULL) {
@@ -152,9 +154,13 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
         
         // Extraire PID (13 bits sur bytes[1:2], bits 0-12)
         uint16_t pid = ((item[1] & 0x1F) << 8) | item[2];
-        
-        // Check si c'est le paquet PUSI du PID audio qu'on cherche
-        if (has_pusi && pid == audio_pid) {
+
+        // Check si c'est le paquet PUSI qu'on cherche
+        // audio_pid == 0 : accepter n'importe quel PUSI (fallback robuste après drop-old massif)
+        // audio_pid != 0 : chercher PID spécifique
+        bool pid_match = (audio_pid == 0) || (pid == audio_pid);
+
+        if (has_pusi && pid_match) {
             // PUSI trouvé ! Conserver ce paquet (held pattern)
             // CRITIQUE : Ne PAS dropper ce paquet, il contient le début PES propre
             if (out_held != NULL) {

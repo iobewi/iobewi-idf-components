@@ -157,20 +157,32 @@ void hls_audio_play_task(void *pvParameters)
                 #endif
                 const uint16_t AUDIO_PID = CONFIG_APP_HLS_PLAYER_AUDIO_PID;
 
-                // Drop jusqu'au prochain PUSI audio (max 50 items = ~9.4 KB)
-                // Le paquet PUSI est CONSERVÉ dans held_pkt (pas droppé)
+                // [FIX] Solution hybride A+B : max_drop élevé + fallback any PID
+                // Tentative 1 : PUSI sur PID audio spécifique (max 150 items = ~28 KB)
+                // Augmenté de 50 → 150 pour survivre aux drop-old massifs (x100, x200)
+                const int RESYNC_MAX_DROP_PID = 150;
+                const int RESYNC_MAX_DROP_ANY = 250;  // Fallback : any PID (~47 KB)
+                const uint16_t ANY_PID = 0x0000;      // Special value : accept any PUSI
+
                 hls_held_ts_packet_t held_pkt = {0};
-                int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, 50, AUDIO_PID, &held_pkt);
+                int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_PID, AUDIO_PID, &held_pkt);
 
                 if (drop_count < 0) {
-                    // PUSI non trouvé dans 50 items → stream très corrompu OU PID audio incorrect
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans 50 items", AUDIO_PID);
-                    ESP_LOGW(TAG, "  → Vérifier CONFIG_APP_HLS_PLAYER_AUDIO_PID ou fallback NOTIF_RESET");
+                    // Tentative 2 : n'importe quel PUSI (fallback robuste)
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items, fallback any PID",
+                             AUDIO_PID, RESYNC_MAX_DROP_PID);
+                    drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_ANY, ANY_PID, &held_pkt);
+                }
+
+                if (drop_count < 0) {
+                    // Échec total : aucun PUSI trouvé (même any PID)
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: aucun PUSI trouvé dans %d items, fallback NOTIF_RESET", RESYNC_MAX_DROP_ANY);
                     // Trigger reset complet (flush + recréer décodeur + drop massif)
                     notif |= NOTIF_RESET;  // Forcer traitement NOTIF_RESET ci-dessous
                 } else {
-                    ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI audio (PID=0x%04X)",
-                             drop_count, held_pkt.pid);
+                    const char *pid_mode = (held_pkt.pid == AUDIO_PID) ? "audio" : "any";
+                    ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI (PID=0x%04X, mode=%s)",
+                             drop_count, held_pkt.pid, pid_mode);
 
                     // ORDRE CRITIQUE : Calculer should_reset_aac AVANT de reset les états
                     bool should_reset_aac = (drop_count > 5) || (zero_consume_streak > 3);
