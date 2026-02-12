@@ -148,18 +148,25 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
     }
 
     // audio_pid == 0 : mode "any PES" (fallback après échec recherche audio)
-    //   → cherche premier PUSI avec PES start (00 00 01), rejette PSI (PAT/PMT)
-    // audio_pid != 0 : chercher PID spécifique
-    
+    //   → Stratégie "préférence audio" : scan tous max_drop items
+    //     * Si trouve PES avec PID audio attendu (0x0101) → return immédiatement
+    //     * Sinon, mémoriser 1er PES trouvé comme fallback
+    //     * Évite de s'arrêter au 1er PES non-audio (PMT/vidéo)
+    // audio_pid != 0 : chercher PID spécifique, return dès trouvé
+
     // Init out_held
     if (out_held != NULL) {
         out_held->has_packet = false;
         out_held->pid = 0;
     }
-    
+
     RingbufHandle_t rb = (RingbufHandle_t)ring_buffer;
     int drop_count = 0;
     bool found_pusi = false;
+
+    // Mode "any PES" : fallback sur 1er PES si audio pas trouvé
+    hls_held_ts_packet_t fallback_held = {0};
+    int fallback_drop_count = -1;
     
     while (drop_count < max_drop) {
         size_t item_size = 0;
@@ -194,46 +201,77 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
         uint16_t pid = ((item[1] & 0x1F) << 8) | item[2];
 
         // Match logic selon mode :
-        // - audio_pid != 0 : chercher PID spécifique
-        // - audio_pid == 0 : mode "any PES" → rejeter PSI, exiger PES start
+        // - audio_pid != 0 : chercher PID spécifique, return dès trouvé
+        // - audio_pid == 0 : mode "any PES" avec préférence audio (0x0101)
         bool pid_match = false;
 
         if (audio_pid != 0) {
-            // Mode normal : PID spécifique
+            // Mode normal : PID spécifique, return immédiatement si trouvé
             pid_match = (pid == audio_pid);
+
+            if (has_pusi && pid_match) {
+                // PUSI trouvé ! Conserver et return immédiatement
+                if (out_held != NULL) {
+                    memcpy(out_held->data, item, 188);
+                    out_held->pid = pid;
+                    out_held->has_packet = true;
+                }
+
+                found_pusi = true;
+                vRingbufferReturnItem(rb, item);
+
+                ESP_LOGD(TAG, "drop_until_pusi: PUSI trouvé (PID=0x%04X) après %d drops",
+                         pid, drop_count);
+                break;
+            }
+
         } else {
-            // Mode "any PES" (fallback) :
-            // - Rejeter PAT (PID 0x0000)
-            // - Exiger préfixe PES (00 00 01) pour filtrer PMT/PSI
+            // Mode "any PES" (fallback) avec PRÉFÉRENCE AUDIO :
+            // Stratégie : scanner tous max_drop items
+            //   1) Si trouve PES avec PID 0x0101 (audio) → return immédiatement (priorité)
+            //   2) Sinon, mémoriser 1er PES trouvé comme fallback
+            //   3) À la fin du scan, retourner fallback si disponible
+
+            // Rejeter PAT (PID 0x0000)
             if (pid == 0x0000) {
-                // PAT, skip
                 vRingbufferReturnItem(rb, item);
                 drop_count++;
                 continue;
             }
 
             // Vérifier que c'est bien un début PES (pas PSI/PMT)
-            if (ts_packet_has_pes_start(item)) {
-                pid_match = true;
-            }
-        }
+            if (has_pusi && ts_packet_has_pes_start(item)) {
+                // C'est un PES ! Vérifier si c'est audio (priorité)
+                const uint16_t AUDIO_PID_PREFERRED = 0x0101;  // PID audio typique FIP/France Inter
 
-        if (has_pusi && pid_match) {
-            // PUSI trouvé ! Conserver ce paquet (held pattern)
-            // CRITIQUE : Ne PAS dropper ce paquet, il contient le début PES propre
-            if (out_held != NULL) {
-                memcpy(out_held->data, item, 188);
-                out_held->pid = pid;
-                out_held->has_packet = true;
+                if (pid == AUDIO_PID_PREFERRED) {
+                    // JACKPOT : PES audio trouvé ! Return immédiatement
+                    if (out_held != NULL) {
+                        memcpy(out_held->data, item, 188);
+                        out_held->pid = pid;
+                        out_held->has_packet = true;
+                    }
+
+                    found_pusi = true;
+                    vRingbufferReturnItem(rb, item);
+
+                    ESP_LOGD(TAG, "drop_until_pusi: PUSI audio (PID=0x%04X) trouvé après %d drops (mode any_pes)",
+                             pid, drop_count);
+                    break;
+
+                } else {
+                    // PES non-audio (vidéo/autre) → mémoriser comme fallback, continuer scan
+                    if (!fallback_held.has_packet) {
+                        memcpy(fallback_held.data, item, 188);
+                        fallback_held.pid = pid;
+                        fallback_held.has_packet = true;
+                        fallback_drop_count = drop_count;
+
+                        ESP_LOGD(TAG, "drop_until_pusi: PES fallback (PID=0x%04X) mémorisé, continue scan audio",
+                                 pid);
+                    }
+                }
             }
-            
-            found_pusi = true;
-            vRingbufferReturnItem(rb, item);  // Libérer l'item du ringbuffer
-            
-            // NE PAS incrémenter drop_count : ce paquet est SAUVÉ, pas droppé
-            ESP_LOGD(TAG, "drop_until_pusi: PUSI trouvé (PID=0x%04X) après %d drops", 
-                     pid, drop_count);
-            break;
         }
         
         // Pas trouvé, dropper et continuer
@@ -241,13 +279,31 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
         drop_count++;
     }
     
-    if (!found_pusi) {
-        ESP_LOGW(TAG, "drop_until_pusi: PUSI non trouvé après %d drops (max=%d)", 
-                 drop_count, max_drop);
-        return -1;
+    // Fin du scan : vérifier résultats
+    if (found_pusi) {
+        // Cas nominal : PID trouvé (audio ou PID spécifique)
+        return drop_count;
     }
-    
-    return drop_count;
+
+    // Pas trouvé : vérifier si fallback PES disponible (mode "any PES" uniquement)
+    if (fallback_held.has_packet) {
+        // Fallback PES disponible : retourner ce PES non-audio
+        ESP_LOGD(TAG, "drop_until_pusi: Aucun PID audio, utilise fallback PES (PID=0x%04X) après %d drops",
+                 fallback_held.pid, fallback_drop_count);
+
+        if (out_held != NULL) {
+            memcpy(out_held->data, fallback_held.data, 188);
+            out_held->pid = fallback_held.pid;
+            out_held->has_packet = true;
+        }
+
+        return fallback_drop_count;
+    }
+
+    // Échec total : aucun PUSI trouvé (ni audio, ni fallback)
+    ESP_LOGW(TAG, "drop_until_pusi: PUSI non trouvé après %d drops (max=%d)",
+             drop_count, max_drop);
+    return -1;
 }
 
 void hls_ts_parser_reset(void)

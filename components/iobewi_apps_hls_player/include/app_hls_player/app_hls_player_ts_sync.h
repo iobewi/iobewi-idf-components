@@ -100,8 +100,11 @@ typedef struct {
  *
  * Modes de recherche :
  * - audio_pid != 0 : Cherche paquet TS avec PUSI + PID spécifique (mode normal)
- * - audio_pid == 0 : Mode "any PES" (fallback robuste) :
- *   * Cherche premier paquet TS avec PUSI + préfixe PES (00 00 01)
+ * - audio_pid == 0 : Mode "any PES" (fallback robuste) avec PRÉFÉRENCE AUDIO :
+ *   * Stratégie : Scan TOUS les max_drop items (pas de break au 1er PES)
+ *   * Priorité 1 : Si trouve PES avec PID 0x0101 (audio) → return immédiatement
+ *   * Priorité 2 : Sinon, mémorise 1er PES trouvé comme fallback
+ *   * À la fin du scan, retourne fallback PES si aucun audio
  *   * Rejette PSI (PAT PID=0x0000, PMT sans PES start)
  *   * Évite corruption par injection de tables PAT/PMT dans le pipeline AAC
  *
