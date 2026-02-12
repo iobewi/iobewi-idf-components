@@ -123,6 +123,10 @@ void hls_audio_play_task(void *pvParameters)
     bool download_signaled = false;
     bool was_downloading = false;
 
+    // [DIAG] Heartbeat audio loop
+    int64_t last_heartbeat_us = 0;
+    int last_decode_count = 0;
+
     while (true) {
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
         // [P0.1] Log HWM périodique toutes les 5s (debug only)
@@ -138,6 +142,25 @@ void hls_audio_play_task(void *pvParameters)
         }
 #endif
 
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+        // [DIAG] Heartbeat audio loop : alive + decode rate + ringbuffer occupancy
+        int64_t now_hb = esp_timer_get_time();
+        if (now_hb - last_heartbeat_us > 2 * 1000 * 1000) {  // Every 2s
+            int frames_decoded = decode_count - last_decode_count;
+            float decode_rate = frames_decoded / 2.0f;  // frames/sec
+
+            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+            size_t rb_used = handle->buffer_size - rb_free;
+            float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
+
+            ESP_LOGI(TAG, "[HEARTBEAT] alive, decoded=%.1f f/s, rb=%.0f%% (%zu/%zu KB), leftover=%zu",
+                     decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len);
+
+            last_heartbeat_us = now_hb;
+            last_decode_count = decode_count;
+        }
+#endif
+
         // === 1) Gestion notifications STOP/RESET/RESYNC ===
         uint32_t notif = 0;
         if (xTaskNotifyWait(0, NOTIF_STOP | NOTIF_RESET | NOTIF_RESYNC, &notif, 0) == pdTRUE) {
@@ -148,7 +171,14 @@ void hls_audio_play_task(void *pvParameters)
             if (notif & NOTIF_RESYNC) {
                 // [FIX BUG AAC error:30] Drop-old propre : reprise sur frontière PES
                 // Drop jusqu'au prochain PUSI du PID audio (garantit début PES complet)
-                ESP_LOGW(TAG, "NOTIF_RESYNC reçue (drop-old) - resync propre TS/PES/AAC");
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t rb_used = handle->buffer_size - rb_free;
+                ESP_LOGW(TAG, "NOTIF_RESYNC reçue reason=drop-old - resync propre TS/PES/AAC [RB: %zu/%zu KB %.0f%%]",
+                         rb_used/1024, handle->buffer_size/1024, (rb_used*100.0f)/handle->buffer_size);
+#else
+                ESP_LOGW(TAG, "NOTIF_RESYNC reçue reason=drop-old - resync propre TS/PES/AAC");
+#endif
 
                 // PID audio typique pour France Inter/FIP : 0x0101 (257 décimal)
                 // TODO: rendre configurable via Kconfig CONFIG_APP_HLS_PLAYER_AUDIO_PID
@@ -169,9 +199,9 @@ void hls_audio_play_task(void *pvParameters)
                 int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_PID, AUDIO_PID, &held_pkt);
 
                 if (drop_count < 0) {
-                    // Échec : PUSI audio non trouvé dans 150 items
+                    // Échec : PUSI audio non trouvé dans 300 items
                     // → Trigger NOTIF_RESET complet (plus efficace que fallback PID incorrect)
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items → fallback NOTIF_RESET complet",
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items → fallback reason=resync_failure NOTIF_RESET complet",
                              AUDIO_PID, RESYNC_MAX_DROP_PID);
                     // Trigger reset complet (flush + recréer décodeur + drop-until-PUSI)
                     notif |= NOTIF_RESET;  // Forcer traitement NOTIF_RESET ci-dessous
@@ -242,7 +272,14 @@ void hls_audio_play_task(void *pvParameters)
                 }
             }
             if (notif & NOTIF_RESET) {
-                ESP_LOGW(TAG, "NOTIF_RESET reçue - reset décodeur suite DISCONTINUITY");
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t rb_used = handle->buffer_size - rb_free;
+                ESP_LOGW(TAG, "NOTIF_RESET reçue reason=discontinuity - reset décodeur complet [RB: %zu/%zu KB %.0f%%]",
+                         rb_used/1024, handle->buffer_size/1024, (rb_used*100.0f)/handle->buffer_size);
+#else
+                ESP_LOGW(TAG, "NOTIF_RESET reçue reason=discontinuity - reset décodeur complet");
+#endif
 
                 // FIX: Drop très peu d'items pour éviter trou audible
                 // Sur DISCONTINUITY, on veut juste purger fin segment précédent
@@ -446,9 +483,18 @@ void hls_audio_play_task(void *pvParameters)
                 memset(decoded_buffer, 0, silence_size);
 
                 size_t bytes_written = 0;
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                int64_t t0_wcb = esp_timer_get_time();
+#endif
                 esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
                                                  silence_size, &bytes_written,
                                                  pdMS_TO_TICKS(100));
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
+                if (dt_wcb > 2000) {  // >2ms warning
+                    ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (silence %zu bytes)", dt_wcb, bytes_written);
+                }
+#endif
                 if (err == ESP_OK) {
                     ESP_LOGD(TAG, "[SILENCE] Inserted %zu bytes to mask underrun", bytes_written);
                 }
@@ -636,9 +682,18 @@ void hls_audio_play_task(void *pvParameters)
             }
 
             size_t bytes_written = 0;
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+            int64_t t0_wcb = esp_timer_get_time();
+#endif
             esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
                                              out_frame.decoded_size, &bytes_written,
                                              pdMS_TO_TICKS(200));
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+            int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
+            if (dt_wcb > 2000) {  // >2ms warning
+                ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (PCM %zu bytes)", dt_wcb, bytes_written);
+            }
+#endif
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Erreur d'écriture audio: %s", esp_err_to_name(err));
             }

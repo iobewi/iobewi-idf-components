@@ -122,7 +122,15 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                                     if (sent_ok) {
                                         handle->drop_recover_count++;
                                         if ((handle->drop_old_count % 100) == 0) {
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                                            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                                            size_t rb_used = handle->buffer_size - rb_free;
+                                            ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry] RB: %zu/%zu KB %.0f%%",
+                                                     (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
+                                                     (rb_used*100.0f)/handle->buffer_size);
+#else
                                             ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry]", (unsigned)handle->drop_old_count);
+#endif
                                         }
                                     }
                                 }
@@ -206,7 +214,15 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                                 if (sent_ok) {
                                     handle->drop_recover_count++;
                                     if ((handle->drop_old_count % 100) == 0) {
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                                        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                                        size_t rb_used = handle->buffer_size - rb_free;
+                                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI] RB: %zu/%zu KB %.0f%%",
+                                                 (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
+                                                 (rb_used*100.0f)/handle->buffer_size);
+#else
                                         ESP_LOGI(TAG, "Drop-old (x%u) [PUSI]", (unsigned)handle->drop_old_count);
+#endif
                                     }
                                 }
                             }

@@ -346,6 +346,36 @@ void hls_fetch_task(void *pvParameters)
                 xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }
 
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+            // [BACKPRESSURE] Pause fetcher si ringbuffer trop plein (évite drop-old escalation)
+            // Hystérésis : pause si ≥80%, resume si <60%
+            const float BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH / 100.0f;
+            const float BACKPRESSURE_LOW = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW / 100.0f;
+
+            while (handle->ring_buffer) {
+                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t rb_used = handle->buffer_size - rb_free;
+                float rb_fill = (float)rb_used / (float)handle->buffer_size;
+
+                if (rb_fill >= BACKPRESSURE_HIGH) {
+                    ESP_LOGW(TAG, "[BACKPRESSURE] RB %.0f%% ≥ %.0f%% - pause fetcher (waiting consumer...)",
+                             rb_fill * 100, BACKPRESSURE_HIGH * 100);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    continue;  // Recheck fill
+                }
+
+                // Ringbuffer OK (< high threshold), sortir de la boucle
+                if (rb_fill < BACKPRESSURE_LOW) {
+                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% < %.0f%% - resume download",
+                             rb_fill * 100, BACKPRESSURE_LOW * 100);
+                } else {
+                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% in range [%.0f%%-%.0f%%] - proceed",
+                             rb_fill * 100, BACKPRESSURE_LOW * 100, BACKPRESSURE_HIGH * 100);
+                }
+                break;  // OK to download
+            }
+#endif
+
             esp_err_t err = hls_http_download_segment(handle, seg->url);
             if (err == ESP_OK) {
                 // Mettre à jour avec le segment le plus récent téléchargé

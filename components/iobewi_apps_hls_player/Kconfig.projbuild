@@ -2,17 +2,18 @@ menu "HLS Player Configuration"
 
     config APP_HLS_PLAYER_RING_BUFFER_SIZE
         int "Ring buffer size (KB)"
-        default 128 if SPIRAM
+        default 512 if SPIRAM
         default 64 if !SPIRAM
-        range 32 256
+        range 32 1024
         help
             Size of the ring buffer for streaming data in KB.
 
             Recommended values:
-            - With PSRAM: 128-256 KB (better resilience to jitter)
+            - With PSRAM: 512-768 KB (mitigation drop-old escalation)
             - Without PSRAM: 64-96 KB (balance RAM/stability)
 
-            Larger buffer = more latency but more resilient to network jitter.
+            Larger buffer = more latency but more resilient to drop-old spirals.
+            H1 mitigation: 512 KB gives breathing room for producer/consumer imbalance.
 
     config APP_HLS_PLAYER_DEC_BUFFER_SIZE
         int "Decoded buffer size (KB)"
@@ -60,5 +61,47 @@ menu "HLS Player Configuration"
             optimal stack sizes for P0.1 stack reduction.
 
             Disable in production to avoid log spam.
+
+    config APP_HLS_PLAYER_RINGBUF_DIAG
+        bool "Enable ringbuffer occupancy diagnostics"
+        default y
+        help
+            Enable periodic ringbuffer occupancy logging (used/free/percent).
+
+            Logs occupancy at key events (write segment, drop-old, NOTIF_RESYNC/RESET)
+            to diagnose producer/consumer imbalance.
+
+            Critical for identifying if drop-old escalation is caused by:
+            - Producer too aggressive (buffer always >90%)
+            - Consumer stall (buffer grows despite slow producer)
+
+    config APP_HLS_PLAYER_BACKPRESSURE
+        bool "Enable fetcher backpressure"
+        default y
+        help
+            Enable automatic backpressure on the fetcher task when ringbuffer is high.
+
+            When enabled, the fetcher will pause downloads if ringbuffer occupancy
+            exceeds the high threshold (80%), and resume when it drops below the low
+            threshold (60%).
+
+            This prevents drop-old escalation spirals by slowing down the producer
+            when the consumer cannot keep up.
+
+    config APP_HLS_PLAYER_BACKPRESSURE_HIGH
+        int "Backpressure high threshold (%)"
+        depends on APP_HLS_PLAYER_BACKPRESSURE
+        default 80
+        range 50 95
+        help
+            Ringbuffer occupancy threshold (%) to trigger backpressure pause.
+
+    config APP_HLS_PLAYER_BACKPRESSURE_LOW
+        int "Backpressure low threshold (%)"
+        depends on APP_HLS_PLAYER_BACKPRESSURE
+        default 60
+        range 30 90
+        help
+            Ringbuffer occupancy threshold (%) to resume after backpressure pause.
 
 endmenu
