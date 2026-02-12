@@ -36,6 +36,11 @@ void hls_fetch_task(void *pvParameters)
     memset(&playlist, 0, sizeof(playlist));
     bool playlist_valid = false;
 
+    // [TODO OPTIMIZATION] Refresh master rare (60s au lieu de 10s)
+    // Master change quasi jamais, mais nécessite de cacher variant_url
+    // Pour l'instant : refresh à chaque cycle (Fix 1+2 suffisent pour UNDERRUN)
+    // int master_refresh_counter = 0;
+
     while (true) {
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
         // [P0.1] Log HWM périodique toutes les 5s (debug only)
@@ -87,11 +92,11 @@ void hls_fetch_task(void *pvParameters)
 
         handle->is_downloading = true;
 
-        // [DIAG LAG] Mesurer temps de téléchargement M3U8 master
+        // [DIAG LAG] Mesurer temps de téléchargement M3U8
         int64_t t0 = esp_timer_get_time();
         char *m3u8_content = hls_http_download_m3u8(handle->stream_url);
         int64_t t1 = esp_timer_get_time();
-        ESP_LOGI(TAG, "[REFRESH] master m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
+        ESP_LOGD(TAG, "[REFRESH] m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
 
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");

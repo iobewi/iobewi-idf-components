@@ -38,6 +38,13 @@ esp_err_t app_hls_player_config_init(app_hls_player_config_t *config)
     memset(config, 0, sizeof(app_hls_player_config_t));
     config->buffer_size = 0;  // 0 = utilise CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE du Kconfig
 
+    // [PROD] Réduire spam logs réseau (évite lag audio pendant TLS/HTTP refresh)
+    // Logs HLS player restent visibles (INFO/WARN)
+    esp_log_level_set("HTTP_CLIENT", ESP_LOG_WARN);
+    esp_log_level_set("transport_base", ESP_LOG_WARN);
+    esp_log_level_set("esp-tls", ESP_LOG_WARN);
+    esp_log_level_set("event", ESP_LOG_WARN);
+
     return ESP_OK;
 }
 

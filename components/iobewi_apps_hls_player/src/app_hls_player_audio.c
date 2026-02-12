@@ -296,6 +296,25 @@ void hls_audio_play_task(void *pvParameters)
             // Starvation temporaire (pas forcément audible)
             no_data_streak++;
 
+            // [FIX UNDERRUN] Receive secours 25ms si buffer >= 40% et items=0
+            // Évite faux positifs pendant refresh M3U8 (jitter scheduling)
+            if (items_copied == 0 && buffer_level >= 40 && no_data_streak < 10) {
+                size_t ilen = 0;
+                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(25));
+                if (it) {
+                    if (ilen == 188 && gather_len + 188 <= GATHER_BUF_SIZE) {
+                        memcpy(gather_buf + gather_len, it, 188);
+                        gather_len += 188;
+                        items_copied++;
+                        // Si on a atteint min_gather, réinitialiser no_data_streak
+                        if (gather_len >= min_gather) {
+                            no_data_streak = 0;
+                        }
+                    }
+                    vRingbufferReturnItem(handle->ring_buffer, it);
+                }
+            }
+
             // Log UNDERRUN seulement si ça dure (>= 10 cycles = ~200-400ms)
             if (no_data_streak >= 10) {
                 ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, items=%d, fails=%d, stall=%d",
