@@ -491,8 +491,13 @@ void hls_audio_play_task(void *pvParameters)
                                                  pdMS_TO_TICKS(100));
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
                 int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
-                if (dt_wcb > 2000) {  // >2ms warning
-                    ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (silence %zu bytes)", dt_wcb, bytes_written);
+                // 44.1kHz stereo 16-bit = 176.4 KB/s → expected_us = bytes / 0.1764
+                int64_t expected_us = (silence_size * 1000000LL) / 176400;
+                int64_t threshold_us = expected_us * 3 / 2;  // 1.5x expected (ou min 30ms)
+                if (threshold_us < 30000) threshold_us = 30000;
+                if (dt_wcb > threshold_us) {
+                    ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (silence %zu bytes, expected ~%lld us)",
+                             dt_wcb, bytes_written, expected_us);
                 }
 #endif
                 if (err == ESP_OK) {
@@ -690,8 +695,13 @@ void hls_audio_play_task(void *pvParameters)
                                              pdMS_TO_TICKS(200));
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
             int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
-            if (dt_wcb > 2000) {  // >2ms warning
-                ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (PCM %zu bytes)", dt_wcb, bytes_written);
+            // 44.1kHz stereo 16-bit = 176.4 KB/s → expected_us = bytes / 0.1764
+            int64_t expected_us = (out_frame.decoded_size * 1000000LL) / 176400;
+            int64_t threshold_us = expected_us * 3 / 2;  // 1.5x expected (ou min 30ms)
+            if (threshold_us < 30000) threshold_us = 30000;
+            if (dt_wcb > threshold_us) {
+                ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (PCM %zu bytes, expected ~%lld us)",
+                         dt_wcb, bytes_written, expected_us);
             }
 #endif
             if (err != ESP_OK) {

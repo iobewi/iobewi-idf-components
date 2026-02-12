@@ -75,7 +75,7 @@ esp_err_t app_hls_player_new(const app_hls_player_config_t *config, app_hls_play
 
     // Déterminer buffer_size (Kconfig si 0, sinon config utilisateur)
     const size_t MIN_BUFFER_SIZE = 16 * 1024;   // 16 KB minimum
-    const size_t MAX_BUFFER_SIZE = 256 * 1024;  // 256 KB maximum
+    const size_t MAX_BUFFER_SIZE = 1024 * 1024;  // 1024 KB maximum (H1: support 512-768 KB)
     size_t buffer_size = config->buffer_size;
 
     if (buffer_size == 0) {
