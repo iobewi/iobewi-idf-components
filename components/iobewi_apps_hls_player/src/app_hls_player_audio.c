@@ -157,30 +157,30 @@ void hls_audio_play_task(void *pvParameters)
                 #endif
                 const uint16_t AUDIO_PID = CONFIG_APP_HLS_PLAYER_AUDIO_PID;
 
-                // [FIX] Solution hybride A+B : max_drop élevé + fallback any PID
+                // [FIX] Solution hybride A+B+D : max_drop élevé + fallback "any PES" (filtré PSI)
                 // Tentative 1 : PUSI sur PID audio spécifique (max 150 items = ~28 KB)
                 // Augmenté de 50 → 150 pour survivre aux drop-old massifs (x100, x200)
                 const int RESYNC_MAX_DROP_PID = 150;
-                const int RESYNC_MAX_DROP_ANY = 250;  // Fallback : any PID (~47 KB)
-                const uint16_t ANY_PID = 0x0000;      // Special value : accept any PUSI
+                const int RESYNC_MAX_DROP_ANY = 250;  // Fallback : any PES (00 00 01), rejette PSI (~47 KB)
+                const uint16_t ANY_PID = 0x0000;      // Special value : mode "any PES" (rejette PAT/PMT)
 
                 hls_held_ts_packet_t held_pkt = {0};
                 int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_PID, AUDIO_PID, &held_pkt);
 
                 if (drop_count < 0) {
-                    // Tentative 2 : n'importe quel PUSI (fallback robuste)
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items, fallback any PID",
+                    // Tentative 2 : n'importe quel PES (fallback robuste, filtre PSI)
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans %d items, fallback any PES (filtre PSI)",
                              AUDIO_PID, RESYNC_MAX_DROP_PID);
                     drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, RESYNC_MAX_DROP_ANY, ANY_PID, &held_pkt);
                 }
 
                 if (drop_count < 0) {
-                    // Échec total : aucun PUSI trouvé (même any PID)
-                    ESP_LOGW(TAG, "NOTIF_RESYNC: aucun PUSI trouvé dans %d items, fallback NOTIF_RESET", RESYNC_MAX_DROP_ANY);
+                    // Échec total : aucun PES trouvé (même any PES filtré)
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: aucun PES trouvé dans %d items, fallback NOTIF_RESET", RESYNC_MAX_DROP_ANY);
                     // Trigger reset complet (flush + recréer décodeur + drop massif)
                     notif |= NOTIF_RESET;  // Forcer traitement NOTIF_RESET ci-dessous
                 } else {
-                    const char *pid_mode = (held_pkt.pid == AUDIO_PID) ? "audio" : "any";
+                    const char *pid_mode = (held_pkt.pid == AUDIO_PID) ? "audio" : "any_pes";
                     ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI (PID=0x%04X, mode=%s)",
                              drop_count, held_pkt.pid, pid_mode);
 
@@ -195,10 +195,17 @@ void hls_audio_play_task(void *pvParameters)
                     hls_ts_parser_reset();  // Reset explicite état TS/PES (noop actuellement, future-proof)
 
                     // Injecter le paquet PUSI held dans gather_buf (début PES propre)
+                    // GARDE-FOU : N'injecter QUE si PID audio (sinon PSI/PMT → corruption)
                     if (held_pkt.has_packet) {
-                        memcpy(gather_buf, held_pkt.data, 188);
-                        gather_len = 188;
-                        ESP_LOGD(TAG, "NOTIF_RESYNC: paquet PUSI injecté dans gather_buf (188 bytes)");
+                        if (held_pkt.pid == AUDIO_PID) {
+                            memcpy(gather_buf, held_pkt.data, 188);
+                            gather_len = 188;
+                            ESP_LOGD(TAG, "NOTIF_RESYNC: paquet PUSI audio injecté dans gather_buf (188 bytes)");
+                        } else {
+                            ESP_LOGW(TAG, "NOTIF_RESYNC: held_pkt PID=0x%04X not audio (0x%04X) → NOT injected, gather_len=0",
+                                     held_pkt.pid, AUDIO_PID);
+                            // gather_len reste 0 → force refill ou reset au prochain cycle
+                        }
                     }
 
                     // Protection post-resync : évite re-resync immédiat / faux positifs

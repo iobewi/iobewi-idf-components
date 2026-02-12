@@ -93,22 +93,29 @@ typedef struct {
 } hls_held_ts_packet_t;
 
 /**
- * @brief Drop items ringbuffer jusqu'au prochain paquet TS avec PUSI du PID audio
+ * @brief Drop items ringbuffer jusqu'au prochain paquet TS avec PUSI (PID audio ou any PES)
  *
  * Cette fonction garantit une reprise sur frontière PES propre après drop-old,
  * évitant les erreurs AAC error:30 causées par réinjection de PES tronqué.
  *
- * Logique :
+ * Modes de recherche :
+ * - audio_pid != 0 : Cherche paquet TS avec PUSI + PID spécifique (mode normal)
+ * - audio_pid == 0 : Mode "any PES" (fallback robuste) :
+ *   * Cherche premier paquet TS avec PUSI + préfixe PES (00 00 01)
+ *   * Rejette PSI (PAT PID=0x0000, PMT sans PES start)
+ *   * Évite corruption par injection de tables PAT/PMT dans le pipeline AAC
+ *
+ * Logique commune :
  * - Boucle receive(0) jusqu'à trouver paquet TS avec :
  *   * Sync byte 0x47
- *   * PUSI flag = 1 (Payload Unit Start Indicator, début PES/PSI)
- *   * PID = audio_pid
+ *   * PUSI flag = 1 (Payload Unit Start Indicator)
+ *   * Critères PID selon mode (voir ci-dessus)
  * - Le paquet PUSI trouvé est CONSERVÉ dans out_held (held packet pattern)
  * - Max max_drop iterations (sécurité anti-boucle infinie si stream corrompu)
  *
  * @param[in]  ring_buffer Ring buffer source (NOSPLIT, items = 188 bytes)
- * @param[in]  max_drop    Nombre max d'items à dropper (ex: 50 = ~9.4 KB)
- * @param[in]  audio_pid   PID audio cible (ex: 0x0101 pour France Inter/FIP)
+ * @param[in]  max_drop    Nombre max d'items à dropper (ex: 150 = ~28 KB)
+ * @param[in]  audio_pid   PID audio cible (ex: 0x0101), ou 0 pour mode "any PES"
  * @param[out] out_held    Paquet PUSI conservé (ne pas dropper ce paquet clé!)
  *
  * @return Nombre d'items droppés (SANS compter le paquet held), -1 si PUSI non trouvé
@@ -116,7 +123,8 @@ typedef struct {
  * @note
  *     - Nécessite RingbufHandle_t (freertos/ringbuf.h)
  *     - Le paquet PUSI est copié dans out_held->data[] puis libéré du ringbuffer
- *     - L'appelant doit injecter out_held->data dans gather_buf pour reprise propre
+ *     - GARDE-FOU : L'appelant DOIT valider out_held->pid == audio_pid avant injection
+ *       (sinon risque d'injection PSI si mode "any PES" trouve un PID non-audio)
  */
 int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
                                uint16_t audio_pid, hls_held_ts_packet_t *out_held);

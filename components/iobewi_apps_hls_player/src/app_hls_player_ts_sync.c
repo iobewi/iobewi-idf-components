@@ -103,6 +103,42 @@ bool hls_ts_find_next_sync(const uint8_t *buf, size_t len, size_t *out_skip)
     return false;
 }
 
+/**
+ * @brief Détecte si un paquet TS contient un début PES (PUSI + préfixe 00 00 01)
+ *
+ * Cette fonction filtre les PSI (PAT/PMT) qui ont PUSI mais pas de préfixe PES.
+ *
+ * @param pkt Paquet TS (188 bytes, sync 0x47 déjà validé)
+ * @return true si PUSI=1 ET payload commence par 00 00 01 (PES start)
+ */
+static bool ts_packet_has_pes_start(const uint8_t *pkt)
+{
+    // Vérifier PUSI (bit 6 de byte[1])
+    bool pusi = (pkt[1] & 0x40) != 0;
+    if (!pusi) return false;
+
+    // Extraire adaptation_field_control (bits 4-5 de byte[3])
+    int afc = (pkt[3] >> 4) & 0x3;
+    int payload_offset = 4;
+
+    // afc=0: réservé, afc=2: adaptation only (no payload)
+    if (afc == 0 || afc == 2) return false;
+
+    // afc=3: adaptation + payload → skip adaptation field
+    if (afc == 3) {
+        if (payload_offset >= 188) return false; // Safety
+        int afl = pkt[4]; // adaptation_field_length
+        payload_offset = 5 + afl;
+        if (payload_offset >= 188) return false; // Payload doit rester dans paquet
+    }
+
+    // Vérifier préfixe PES (00 00 01)
+    if (payload_offset + 2 >= 188) return false;
+    return (pkt[payload_offset] == 0x00 &&
+            pkt[payload_offset + 1] == 0x00 &&
+            pkt[payload_offset + 2] == 0x01);
+}
+
 int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
                                uint16_t audio_pid, hls_held_ts_packet_t *out_held)
 {
@@ -111,7 +147,9 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
         return -1;
     }
 
-    // audio_pid == 0 est valide : signifie "accepter n'importe quel PUSI" (fallback robuste)
+    // audio_pid == 0 : mode "any PES" (fallback après échec recherche audio)
+    //   → cherche premier PUSI avec PES start (00 00 01), rejette PSI (PAT/PMT)
+    // audio_pid != 0 : chercher PID spécifique
     
     // Init out_held
     if (out_held != NULL) {
@@ -155,10 +193,30 @@ int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
         // Extraire PID (13 bits sur bytes[1:2], bits 0-12)
         uint16_t pid = ((item[1] & 0x1F) << 8) | item[2];
 
-        // Check si c'est le paquet PUSI qu'on cherche
-        // audio_pid == 0 : accepter n'importe quel PUSI (fallback robuste après drop-old massif)
-        // audio_pid != 0 : chercher PID spécifique
-        bool pid_match = (audio_pid == 0) || (pid == audio_pid);
+        // Match logic selon mode :
+        // - audio_pid != 0 : chercher PID spécifique
+        // - audio_pid == 0 : mode "any PES" → rejeter PSI, exiger PES start
+        bool pid_match = false;
+
+        if (audio_pid != 0) {
+            // Mode normal : PID spécifique
+            pid_match = (pid == audio_pid);
+        } else {
+            // Mode "any PES" (fallback) :
+            // - Rejeter PAT (PID 0x0000)
+            // - Exiger préfixe PES (00 00 01) pour filtrer PMT/PSI
+            if (pid == 0x0000) {
+                // PAT, skip
+                vRingbufferReturnItem(rb, item);
+                drop_count++;
+                continue;
+            }
+
+            // Vérifier que c'est bien un début PES (pas PSI/PMT)
+            if (ts_packet_has_pes_start(item)) {
+                pid_match = true;
+            }
+        }
 
         if (has_pusi && pid_match) {
             // PUSI trouvé ! Conserver ce paquet (held pattern)
