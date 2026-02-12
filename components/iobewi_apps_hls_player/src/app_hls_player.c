@@ -4,11 +4,11 @@
  */
 
 #include "app_hls_player/app_hls_player.h"
-#include "app_hls_player_fetcher.h"
-#include "app_hls_player_audio.h"
-#include "app_hls_player_http.h"
-#include "app_hls_player_ts_sync.h"
-#include "app_hls_player_internal.h"
+#include "app_hls_player/app_hls_player_fetcher.h"
+#include "app_hls_player/app_hls_player_audio.h"
+#include "app_hls_player/app_hls_player_http.h"
+#include "app_hls_player/app_hls_player_ts_sync.h"
+#include "app_hls_player/app_hls_player_internal.h"
 #include "lib_m3u8_parser/lib_m3u8_parser.h"
 #include "esp_log.h"
 #include "esp_http_client.h"

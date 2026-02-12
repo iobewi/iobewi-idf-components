@@ -3,8 +3,8 @@
  * @brief Implémentation du module de téléchargement HTTP/HTTPS
  */
 
-#include "app_hls_player_http.h"
-#include "app_hls_player_internal.h"
+#include "app_hls_player/app_hls_player_http.h"
+#include "app_hls_player/app_hls_player_internal.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"

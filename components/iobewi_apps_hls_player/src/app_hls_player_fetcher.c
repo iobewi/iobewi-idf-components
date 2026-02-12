@@ -3,9 +3,9 @@
  * @brief Implémentation du module de téléchargement HLS (fetch task)
  */
 
-#include "app_hls_player_fetcher.h"
-#include "app_hls_player_internal.h"
-#include "app_hls_player_http.h"
+#include "app_hls_player/app_hls_player_fetcher.h"
+#include "app_hls_player/app_hls_player_internal.h"
+#include "app_hls_player/app_hls_player_http.h"
 #include "lib_m3u8_parser/lib_m3u8_parser.h"
 #include "esp_log.h"
 #include "esp_timer.h"

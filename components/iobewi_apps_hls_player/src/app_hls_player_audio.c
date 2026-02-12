@@ -3,9 +3,9 @@
  * @brief Implémentation du module de décodage audio
  */
 
-#include "app_hls_player_audio.h"
-#include "app_hls_player_internal.h"
-#include "app_hls_player_ts_sync.h"
+#include "app_hls_player/app_hls_player_audio.h"
+#include "app_hls_player/app_hls_player_internal.h"
+#include "app_hls_player/app_hls_player_ts_sync.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "simple_dec/esp_audio_simple_dec.h"
@@ -86,8 +86,33 @@ void hls_audio_play_task(void *pvParameters)
     int resync_count = 0;
     int no_data_streak = 0;  // [DIAG LAG] Compteur underrun
 
-    ESP_LOGI(TAG, "Démarrage de la lecture audio...");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // [FIX UNDERRUN] Prébuffer 70-80% avant démarrage (vs 500ms fixe)
+    // Donne >400ms marge pour survivre aux refresh M3U8 (389ms)
+    ESP_LOGI(TAG, "Attente prébuffer 70%% avant démarrage audio...");
+    const int TARGET_PREBUFFER = 70;  // 70% du buffer
+    const int PREBUFFER_TIMEOUT_MS = 10000;  // Timeout sécurité 10s
+    int64_t prebuffer_start = esp_timer_get_time();
+    int current_level = 0;
+
+    while (true) {
+        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
+        size_t filled_size = handle->buffer_size - free_size;
+        current_level = (filled_size * 100) / handle->buffer_size;
+
+        if (current_level >= TARGET_PREBUFFER) {
+            ESP_LOGI(TAG, "Prébuffer atteint: %d%% - démarrage lecture", current_level);
+            break;
+        }
+
+        int64_t elapsed_ms = (esp_timer_get_time() - prebuffer_start) / 1000;
+        if (elapsed_ms > PREBUFFER_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "Timeout prébuffer après %lld ms (niveau=%d%%) - démarrage forcé",
+                     elapsed_ms, current_level);
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));  // Check toutes les 50ms
+    }
 
     int decode_count = 0;
     int error_count = 0;
@@ -296,23 +321,27 @@ void hls_audio_play_task(void *pvParameters)
             // Starvation temporaire (pas forcément audible)
             no_data_streak++;
 
-            // [FIX UNDERRUN] Receive secours 100ms si buffer >= 40% et items=0
-            // Évite faux positifs pendant refresh M3U8 (jusqu'à 400ms TLS/HTTP)
-            // Timeout 100ms permet d'attendre fin du refresh sans bloquer trop
+            // [FIX UNDERRUN] Receive secours en tranches (16x 25ms max = 400ms)
+            // Évite gros blocage, sort dès qu'un item arrive
+            // Permet de survivre aux refresh M3U8 (jusqu'à 400ms TLS/HTTP)
             if (items_copied == 0 && buffer_level >= 40 && no_data_streak < 10) {
-                size_t ilen = 0;
-                uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(100));
-                if (it) {
-                    if (ilen == 188 && gather_len + 188 <= GATHER_BUF_SIZE) {
-                        memcpy(gather_buf + gather_len, it, 188);
-                        gather_len += 188;
-                        items_copied++;
-                        // Si on a atteint min_gather, réinitialiser no_data_streak
-                        if (gather_len >= min_gather) {
-                            no_data_streak = 0;
+                for (int attempt = 0; attempt < 16 && items_copied == 0; attempt++) {
+                    size_t ilen = 0;
+                    uint8_t *it = (uint8_t *)xRingbufferReceive(handle->ring_buffer, &ilen, pdMS_TO_TICKS(25));
+                    if (it) {
+                        if (ilen == 188 && gather_len + 188 <= GATHER_BUF_SIZE) {
+                            memcpy(gather_buf + gather_len, it, 188);
+                            gather_len += 188;
+                            items_copied++;
+                            // Si on a atteint min_gather, réinitialiser no_data_streak
+                            if (gather_len >= min_gather) {
+                                no_data_streak = 0;
+                            }
                         }
+                        vRingbufferReturnItem(handle->ring_buffer, it);
+                        break;  // Item récupéré, sortir immédiatement
                     }
-                    vRingbufferReturnItem(handle->ring_buffer, it);
+                    // Si toujours rien après plusieurs attempts, peut-être produire silence ici
                 }
             }
 

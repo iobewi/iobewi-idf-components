@@ -6,7 +6,7 @@
  * Les logs sont désactivés par défaut en production.
  */
 
-#include "app_hls_player_ts_sync.h"
+#include "app_hls_player/app_hls_player_ts_sync.h"
 
 // Log optionnel (ESP_LOGD désactivé par défaut en production)
 #ifdef CONFIG_LOG_DEFAULT_LEVEL_DEBUG

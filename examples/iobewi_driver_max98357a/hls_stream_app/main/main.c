@@ -53,7 +53,7 @@ static esp_err_t audio_write_callback(void *user_ctx, const void *data,
     int16_t *samples = (int16_t *)data;
     size_t sample_count = size / sizeof(int16_t);
     for (size_t i = 0; i < sample_count; i++) {
-        samples[i] = samples[i] / 4;
+        samples[i] = samples[i] / 8;
     }
 
     return drv_max98357a_write(driver, data, size, bytes_written, timeout_ms);
