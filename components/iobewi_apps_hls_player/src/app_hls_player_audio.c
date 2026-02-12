@@ -24,8 +24,8 @@ void hls_audio_play_task(void *pvParameters)
 
     // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
     UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
-    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes)",
-             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t));
+    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes) [sizeof(StackType_t)=%u]",
+             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t), sizeof(StackType_t));
 
     // Créer le décodeur TS
     esp_audio_simple_dec_handle_t dec_handle = NULL;
@@ -97,12 +97,14 @@ void hls_audio_play_task(void *pvParameters)
     while (true) {
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
         // [P0.1] Log HWM périodique toutes les 5s (debug only)
+        // HWM = free min (marge restante), pas usage
+        // Usage peak = S_allocated - HWM
         static int64_t last_log_us = 0;
         int64_t now = esp_timer_get_time();
         if (now - last_log_us > 5 * 1000 * 1000) {
             last_log_us = now;
             UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGD(TAG, "[STACK] HWM=%u words (%u bytes) [audio_play]",
+            ESP_LOGD(TAG, "[STACK] HWM=%u words (%u bytes free min) [audio_play]",
                      (unsigned)hwm, (unsigned)(hwm * sizeof(StackType_t)));
         }
 #endif

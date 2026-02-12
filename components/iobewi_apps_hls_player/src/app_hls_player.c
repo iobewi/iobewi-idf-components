@@ -183,6 +183,9 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
 
     // Créer les tâches
     // Core pinning : fetch sur CPU0 (Wi-Fi/TLS), play sur CPU1 (isolation audio)
+    // NOTE: xTaskCreatePinnedToCore() attend usStackDepth en WORDS (pas bytes)
+    // Sur Xtensa: 1 word = 4 bytes, donc 14336 words = 57 KB, 6144 words = 24 KB
+    // IMPORTANT: Vérifier sizeof(StackType_t) dans les logs HWM pour confirmation
     BaseType_t ret = xTaskCreatePinnedToCore(hls_fetch_task, "hls_fetch", 14336, handle, 5, &handle->fetch_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Échec de création de la task de téléchargement");

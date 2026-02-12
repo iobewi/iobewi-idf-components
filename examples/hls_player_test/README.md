@@ -79,7 +79,12 @@ Pour établir le baseline HWM avant réduction des stacks :
    - audio_play : rechercher minimum dans logs `[audio_play]`
 
 6. Calculer nouvelle taille stack :
-   - Formule : `new_stack = HWM_min / 0.75` (marge 25%)
+   - **FORMULE CORRECTE** : `S_new = (S_old - F_min) / 0.75`
+     - S_old = stack allouée actuelle (bytes)
+     - F_min = HWM_min observé (bytes)
+     - (S_old - F_min) = usage au pic
+   - **ATTENTION** : HWM = free min (marge), PAS usage
+   - Voir détails : `components/iobewi_apps_hls_player/docs/P0.1_STACK_REDUCTION.md`
    - Arrondir au KB supérieur
 
 ## Tests Attendus
