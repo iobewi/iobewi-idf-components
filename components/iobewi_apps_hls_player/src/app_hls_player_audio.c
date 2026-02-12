@@ -86,6 +86,10 @@ void hls_audio_play_task(void *pvParameters)
     int resync_count = 0;
     int no_data_streak = 0;  // [DIAG LAG] Compteur underrun
 
+    // [FIX AAC error:30] Protection post-resync : évite re-resync immédiat / faux positifs
+    // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
+    int just_resynced_cycles = 0;
+
     // [FIX UNDERRUN] Prébuffer 70-80% avant démarrage (vs 500ms fixe)
     // Donne >400ms marge pour survivre aux refresh M3U8 (389ms)
     ESP_LOGI(TAG, "Attente prébuffer 70%% avant démarrage audio...");
@@ -142,28 +146,84 @@ void hls_audio_play_task(void *pvParameters)
                 break;
             }
             if (notif & NOTIF_RESYNC) {
-                // Soft resync: drop quelques items SANS recréer le décodeur
-                // Évite les audio skips causés par NOTIF_RESET trop fréquents
-                ESP_LOGW(TAG, "NOTIF_RESYNC reçue (drop-old) - soft resync sans reset décodeur");
+                // [FIX BUG AAC error:30] Drop-old propre : reprise sur frontière PES
+                // Drop jusqu'au prochain PUSI du PID audio (garantit début PES complet)
+                ESP_LOGW(TAG, "NOTIF_RESYNC reçue (drop-old) - resync propre TS/PES/AAC");
 
-                size_t item_size = 0;
-                void *item;
-                int drop_count = 0;
-                const int SOFT_DROP = 10;  // ~10 × 188 = 1.88 KB (soft, peu audible)
+                // PID audio typique pour France Inter/FIP : 0x0101 (257 décimal)
+                // TODO: rendre configurable via Kconfig CONFIG_APP_HLS_PLAYER_AUDIO_PID
+                #ifndef CONFIG_APP_HLS_PLAYER_AUDIO_PID
+                #define CONFIG_APP_HLS_PLAYER_AUDIO_PID 0x0101
+                #endif
+                const uint16_t AUDIO_PID = CONFIG_APP_HLS_PLAYER_AUDIO_PID;
 
-                while (drop_count < SOFT_DROP && (item = xRingbufferReceive(handle->ring_buffer, &item_size, 0)) != NULL) {
-                    vRingbufferReturnItem(handle->ring_buffer, item);
-                    drop_count++;
+                // Drop jusqu'au prochain PUSI audio (max 50 items = ~9.4 KB)
+                // Le paquet PUSI est CONSERVÉ dans held_pkt (pas droppé)
+                hls_held_ts_packet_t held_pkt = {0};
+                int drop_count = hls_drop_until_audio_pusi(handle->ring_buffer, 50, AUDIO_PID, &held_pkt);
+
+                if (drop_count < 0) {
+                    // PUSI non trouvé dans 50 items → stream très corrompu OU PID audio incorrect
+                    ESP_LOGW(TAG, "NOTIF_RESYNC: PUSI audio (PID=0x%04X) non trouvé dans 50 items", AUDIO_PID);
+                    ESP_LOGW(TAG, "  → Vérifier CONFIG_APP_HLS_PLAYER_AUDIO_PID ou fallback NOTIF_RESET");
+                    // Trigger reset complet (flush + recréer décodeur + drop massif)
+                    notif |= NOTIF_RESET;  // Forcer traitement NOTIF_RESET ci-dessous
+                } else {
+                    ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items, reprise sur PUSI audio (PID=0x%04X)",
+                             drop_count, held_pkt.pid);
+
+                    // ORDRE CRITIQUE : Calculer should_reset_aac AVANT de reset les états
+                    bool should_reset_aac = (drop_count > 5) || (zero_consume_streak > 3);
+
+                    // Flush gather_buf + leftover (données résiduelles potentiellement corrompues)
+                    // Reset état TS/PES parser (implicite via gather/leftover + explicite via fonction)
+                    gather_len = 0;
+                    leftover_len = 0;
+                    zero_consume_streak = 0;
+                    hls_ts_parser_reset();  // Reset explicite état TS/PES (noop actuellement, future-proof)
+
+                    // Injecter le paquet PUSI held dans gather_buf (début PES propre)
+                    if (held_pkt.has_packet) {
+                        memcpy(gather_buf, held_pkt.data, 188);
+                        gather_len = 188;
+                        ESP_LOGD(TAG, "NOTIF_RESYNC: paquet PUSI injecté dans gather_buf (188 bytes)");
+                    }
+
+                    // Protection post-resync : évite re-resync immédiat / faux positifs
+                    // Force remplissage gather_buf pendant 3 cycles avant toute logique fallback
+                    just_resynced_cycles = 3;
+
+                    // Reset décodeur AAC conditionnel (si drop massif OU streak erreurs)
+                    // Seuil : 5 drops = 940 bytes (pas un micro-jitter)
+                    if (should_reset_aac) {
+                        ESP_LOGI(TAG, "Reset décodeur AAC (drop_count=%d, streak_was=%d)",
+                                 drop_count, zero_consume_streak);  // Note: streak déjà reset à 0
+
+                        esp_audio_simple_dec_close(dec_handle);
+
+                        dec_ret = esp_audio_simple_dec_open(&dec_cfg, &dec_handle);
+                        if (dec_ret != ESP_AUDIO_ERR_OK || dec_handle == NULL) {
+                            ESP_LOGE(TAG, "Échec reset décodeur après RESYNC: %d", dec_ret);
+                            // Cleanup
+                            free(gather_buf);
+                            free(decoded_buffer);
+                            if (handle->play_done) {
+                                xSemaphoreGive(handle->play_done);
+                            }
+                            vTaskDelete(NULL);
+                            return;
+                        }
+
+                        ESP_LOGI(TAG, "Décodeur AAC recréé, reprise lecture sur PUSI audio");
+                    } else {
+                        ESP_LOGD(TAG, "Décodeur AAC conservé (reset non nécessaire)");
+                    }
                 }
 
-                ESP_LOGI(TAG, "NOTIF_RESYNC: dropped %d items (%zu bytes)", drop_count, drop_count * 188);
-
-                // Reset gather state (pas de reset décodeur)
-                gather_len = 0;
-                leftover_len = 0;
-                zero_consume_streak = 0;
-
-                continue;  // Reprendre la boucle sans recréer le décodeur
+                // Si fallback NOTIF_RESET activé, continuer vers handler NOTIF_RESET ci-dessous
+                if ((notif & NOTIF_RESET) == 0) {
+                    continue;  // Sinon, reprendre boucle principale
+                }
             }
             if (notif & NOTIF_RESET) {
                 ESP_LOGW(TAG, "NOTIF_RESET reçue - reset décodeur suite DISCONTINUITY");
@@ -233,10 +293,24 @@ void hls_audio_play_task(void *pvParameters)
         // FIX: Respecter leftover_len (bytes déjà présents à conserver)
         // Stratégie "copy then return" : copier puis rendre immédiatement
 
+        // [FIX AAC error:30] Protection post-resync : skip logiques fallback resync/drop-old
+        // Pendant just_resynced_cycles, force remplissage normal gather_buf
+        if (just_resynced_cycles > 0) {
+            just_resynced_cycles--;
+            ESP_LOGD(TAG, "just_resynced protection active (%d cycles restants), skip fallback resync",
+                     just_resynced_cycles);
+
+            // Skip toute logique consumed=0 resync / drop-old pendant protection
+            // Continue remplissage gather_buf normalement ci-dessous
+        }
+
         // Défense: leftover ne doit jamais dépasser GATHER_BUF_SIZE
         if (leftover_len > GATHER_BUF_SIZE) {
-            ESP_LOGW(TAG, "leftover overflow: %zu > %zu, flushing", leftover_len, GATHER_BUF_SIZE);
-            leftover_len = 0;
+            // Seulement si NOT protected
+            if (just_resynced_cycles == 0) {
+                ESP_LOGW(TAG, "leftover overflow: %zu > %zu, flushing", leftover_len, GATHER_BUF_SIZE);
+                leftover_len = 0;
+            }
         }
 
         // FIX STALL: Si consumed==0 persiste, ne pas recopier (resync sur leftover uniquement)
@@ -439,6 +513,13 @@ void hls_audio_play_task(void *pvParameters)
             } else {
                 // Erreur avec consumed>0 : resync ponctuel
                 ESP_LOGW(TAG, "Erreur décodeur (ret=%d) avec consumed=%lu, resync", dec_ret, raw.consumed);
+            }
+
+            // [FIX AAC error:30] Protection post-resync : skip fallback resync pendant protection
+            if (just_resynced_cycles > 0) {
+                ESP_LOGD(TAG, "consumed=0 mais just_resynced protection active, skip fallback resync");
+                // Continue, attend prochain cycle (gather_buf devrait se remplir)
+                continue;
             }
 
             // Tenter resync TS intelligent (PID+PUSI+PES) dans leftover

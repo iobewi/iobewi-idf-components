@@ -79,6 +79,62 @@ bool hls_ts_resync_smart(const uint8_t *buf,
  */
 bool hls_ts_find_next_sync(const uint8_t *buf, size_t len, size_t *out_skip);
 
+/**
+ * @brief Structure pour conserver un paquet TS (held packet pattern)
+ *
+ * Utilisé pour préserver le paquet PUSI trouvé lors du drop-until-PUSI.
+ * Le paquet est copié hors du ringbuffer avant libération pour éviter
+ * de perdre le point de reprise PES propre.
+ */
+typedef struct {
+    bool has_packet;      ///< True si un paquet est conservé
+    uint8_t data[188];    ///< Données du paquet TS (188 bytes MPEG-TS)
+    uint16_t pid;         ///< PID du paquet conservé
+} hls_held_ts_packet_t;
+
+/**
+ * @brief Drop items ringbuffer jusqu'au prochain paquet TS avec PUSI du PID audio
+ *
+ * Cette fonction garantit une reprise sur frontière PES propre après drop-old,
+ * évitant les erreurs AAC error:30 causées par réinjection de PES tronqué.
+ *
+ * Logique :
+ * - Boucle receive(0) jusqu'à trouver paquet TS avec :
+ *   * Sync byte 0x47
+ *   * PUSI flag = 1 (Payload Unit Start Indicator, début PES/PSI)
+ *   * PID = audio_pid
+ * - Le paquet PUSI trouvé est CONSERVÉ dans out_held (held packet pattern)
+ * - Max max_drop iterations (sécurité anti-boucle infinie si stream corrompu)
+ *
+ * @param[in]  ring_buffer Ring buffer source (NOSPLIT, items = 188 bytes)
+ * @param[in]  max_drop    Nombre max d'items à dropper (ex: 50 = ~9.4 KB)
+ * @param[in]  audio_pid   PID audio cible (ex: 0x0101 pour France Inter/FIP)
+ * @param[out] out_held    Paquet PUSI conservé (ne pas dropper ce paquet clé!)
+ *
+ * @return Nombre d'items droppés (SANS compter le paquet held), -1 si PUSI non trouvé
+ *
+ * @note
+ *     - Nécessite RingbufHandle_t (freertos/ringbuf.h)
+ *     - Le paquet PUSI est copié dans out_held->data[] puis libéré du ringbuffer
+ *     - L'appelant doit injecter out_held->data dans gather_buf pour reprise propre
+ */
+int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
+                               uint16_t audio_pid, hls_held_ts_packet_t *out_held);
+
+/**
+ * @brief Reset l'état du parser TS/PES (pour resync propre)
+ *
+ * Reset les états internes qui pourraient garder des traces de PES en cours :
+ * - Continuity counters (si implémenté)
+ * - PES assembly state (si implémenté)
+ * - ES buffer (si implémenté)
+ *
+ * Note : Dans l'implémentation actuelle (gather_buf + leftover), le reset
+ * est implicite via gather_len=0 + leftover_len=0. Cette fonction est un
+ * placeholder pour futures extensions (ex: parser PAT/PMT/PES avec état).
+ */
+void hls_ts_parser_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

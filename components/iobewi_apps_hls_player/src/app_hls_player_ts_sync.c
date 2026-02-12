@@ -7,11 +7,14 @@
  */
 
 #include "app_hls_player/app_hls_player_ts_sync.h"
+#include "esp_log.h"
+#include "freertos/ringbuf.h"
+#include <string.h>
+
+static const char *TAG = "hls_ts_sync";
 
 // Log optionnel (ESP_LOGD désactivé par défaut en production)
 #ifdef CONFIG_LOG_DEFAULT_LEVEL_DEBUG
-    #include "esp_log.h"
-    static const char *TAG = "hls_ts_sync";
     #define TS_LOGD(fmt, ...) ESP_LOGD(TAG, fmt, ##__VA_ARGS__)
 #else
     #define TS_LOGD(fmt, ...) do {} while(0)
@@ -98,4 +101,102 @@ bool hls_ts_find_next_sync(const uint8_t *buf, size_t len, size_t *out_skip)
         }
     }
     return false;
+}
+
+int hls_drop_until_audio_pusi(void *ring_buffer, int max_drop,
+                               uint16_t audio_pid, hls_held_ts_packet_t *out_held)
+{
+    if (ring_buffer == NULL || max_drop <= 0 || audio_pid == 0) {
+        ESP_LOGE(TAG, "drop_until_pusi: params invalides (audio_pid doit être != 0)");
+        return -1;
+    }
+    
+    // Init out_held
+    if (out_held != NULL) {
+        out_held->has_packet = false;
+        out_held->pid = 0;
+    }
+    
+    RingbufHandle_t rb = (RingbufHandle_t)ring_buffer;
+    int drop_count = 0;
+    bool found_pusi = false;
+    
+    while (drop_count < max_drop) {
+        size_t item_size = 0;
+        uint8_t *item = (uint8_t *)xRingbufferReceive(rb, &item_size, 0);
+        
+        if (item == NULL) {
+            // Plus d'items disponibles dans le ringbuffer
+            break;
+        }
+        
+        // Vérifier taille TS (188 bytes attendu avec NOSPLIT)
+        if (item_size != 188) {
+            ESP_LOGW(TAG, "drop_until_pusi: item size=%zu != 188, skip", item_size);
+            vRingbufferReturnItem(rb, item);
+            drop_count++;
+            continue;
+        }
+        
+        // Vérifier sync byte 0x47
+        if (item[0] != 0x47) {
+            ESP_LOGD(TAG, "drop_until_pusi: sync byte != 0x47, skip");
+            vRingbufferReturnItem(rb, item);
+            drop_count++;
+            continue;
+        }
+        
+        // Extraire PUSI flag (bit 6 de byte[1])
+        // PUSI = Payload Unit Start Indicator (début PES/PSI section)
+        bool has_pusi = (item[1] & 0x40) != 0;
+        
+        // Extraire PID (13 bits sur bytes[1:2], bits 0-12)
+        uint16_t pid = ((item[1] & 0x1F) << 8) | item[2];
+        
+        // Check si c'est le paquet PUSI du PID audio qu'on cherche
+        if (has_pusi && pid == audio_pid) {
+            // PUSI trouvé ! Conserver ce paquet (held pattern)
+            // CRITIQUE : Ne PAS dropper ce paquet, il contient le début PES propre
+            if (out_held != NULL) {
+                memcpy(out_held->data, item, 188);
+                out_held->pid = pid;
+                out_held->has_packet = true;
+            }
+            
+            found_pusi = true;
+            vRingbufferReturnItem(rb, item);  // Libérer l'item du ringbuffer
+            
+            // NE PAS incrémenter drop_count : ce paquet est SAUVÉ, pas droppé
+            ESP_LOGD(TAG, "drop_until_pusi: PUSI trouvé (PID=0x%04X) après %d drops", 
+                     pid, drop_count);
+            break;
+        }
+        
+        // Pas trouvé, dropper et continuer
+        vRingbufferReturnItem(rb, item);
+        drop_count++;
+    }
+    
+    if (!found_pusi) {
+        ESP_LOGW(TAG, "drop_until_pusi: PUSI non trouvé après %d drops (max=%d)", 
+                 drop_count, max_drop);
+        return -1;
+    }
+    
+    return drop_count;
+}
+
+void hls_ts_parser_reset(void)
+{
+    // [PLACEHOLDER] Implémentation actuelle : reset implicite via gather_len=0
+    // 
+    // Si tu ajoutes un parser TS/PES avec état (ex: continuity counters,
+    // PES assembly buffer, PMT cache), reset ces états ici.
+    //
+    // Exemples futurs :
+    // - ts_ctx.continuity_counter[pid] = -1;
+    // - pes_assembly_reset(&pes_ctx);
+    // - pmt_cache_clear(&pmt_ctx);
+    
+    ESP_LOGD(TAG, "ts_parser_reset: état TS/PES réinitialisé (noop actuellement)");
 }
