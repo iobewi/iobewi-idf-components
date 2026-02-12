@@ -17,6 +17,42 @@
 static const char *TAG = "hls_fetcher";
 
 /**
+ * @brief Download M3U8 avec retry rapide exponentiel en cas d'échec
+ *
+ * Évite les trous audio longs (~15s) causés par TLS connect timeout.
+ * Retry : 250ms, 500ms, 1s, 2s (budget total ~4s) avant abandon.
+ *
+ * @param url URL de la playlist M3U8
+ * @return Contenu M3U8 alloué (free par appelant) ou NULL si échec total
+ */
+static char *hls_http_download_m3u8_with_retry(const char *url)
+{
+    const int retry_delays_ms[] = {250, 500, 1000, 2000};
+    const int retry_count = sizeof(retry_delays_ms) / sizeof(retry_delays_ms[0]);
+
+    for (int attempt = 0; attempt < retry_count; attempt++) {
+        char *m3u8_content = hls_http_download_m3u8(url);
+
+        if (m3u8_content != NULL) {
+            if (attempt > 0) {
+                ESP_LOGW(TAG, "M3U8 refresh recovered after %d retries", attempt);
+            }
+            return m3u8_content;
+        }
+
+        // Échec : retry après délai exponentiel (sauf au dernier essai)
+        if (attempt < retry_count - 1) {
+            ESP_LOGW(TAG, "M3U8 refresh failed, retry in %d ms (%d/%d)",
+                     retry_delays_ms[attempt], attempt + 1, retry_count);
+            vTaskDelay(pdMS_TO_TICKS(retry_delays_ms[attempt]));
+        }
+    }
+
+    ESP_LOGE(TAG, "M3U8 refresh failed after %d retries", retry_count);
+    return NULL;
+}
+
+/**
  * @brief Tâche de téléchargement HLS
  */
 void hls_fetch_task(void *pvParameters)
@@ -92,9 +128,9 @@ void hls_fetch_task(void *pvParameters)
 
         handle->is_downloading = true;
 
-        // [DIAG LAG] Mesurer temps de téléchargement M3U8
+        // [DIAG LAG + FIX UNDERRUN] Retry rapide exponentiel (250ms, 500ms, 1s, 2s)
         int64_t t0 = esp_timer_get_time();
-        char *m3u8_content = hls_http_download_m3u8(handle->stream_url);
+        char *m3u8_content = hls_http_download_m3u8_with_retry(handle->stream_url);
         int64_t t1 = esp_timer_get_time();
         ESP_LOGD(TAG, "[REFRESH] m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
 
@@ -195,9 +231,9 @@ void hls_fetch_task(void *pvParameters)
             strncpy(media_url, playlist.variants[idx_selected].url, LIB_M3U8_PARSER_MAX_URL_LEN - 1);
             media_url[LIB_M3U8_PARSER_MAX_URL_LEN - 1] = '\0';
 
-            // [DIAG LAG] Mesurer temps de téléchargement M3U8 media
+            // [DIAG LAG + FIX UNDERRUN] Retry rapide exponentiel (250ms, 500ms, 1s, 2s)
             t0 = esp_timer_get_time();
-            m3u8_content = hls_http_download_m3u8(media_url);
+            m3u8_content = hls_http_download_m3u8_with_retry(media_url);
             t1 = esp_timer_get_time();
             ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
 

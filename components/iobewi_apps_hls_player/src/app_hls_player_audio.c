@@ -435,6 +435,20 @@ void hls_audio_play_task(void *pvParameters)
             if (no_data_streak >= 10) {
                 ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, items=%d, fails=%d, stall=%d",
                          gather_len, min_gather, buffer_level, items_copied, receive_fails, stall);
+
+                // [FIX GLITCH] Insertion silence pour masquer le trou audio
+                // Évite clics/pops pendant underrun réseau (TLS timeout, etc.)
+                const size_t silence_size = 4096;  // 4 KB silence (~23ms @ 44.1kHz stereo 16-bit)
+                memset(decoded_buffer, 0, silence_size);
+
+                size_t bytes_written = 0;
+                esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
+                                                 silence_size, &bytes_written,
+                                                 pdMS_TO_TICKS(100));
+                if (err == ESP_OK) {
+                    ESP_LOGD(TAG, "[SILENCE] Inserted %zu bytes to mask underrun", bytes_written);
+                }
+
                 no_data_streak = 0;  // Reset pour éviter spam
             }
 
