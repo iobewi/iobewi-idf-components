@@ -353,32 +353,18 @@ void hls_fetch_task(void *pvParameters)
             }
 
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-            // [BACKPRESSURE] Pause fetcher si ringbuffer trop plein (évite drop-old escalation)
-            // Hystérésis : pause si ≥80%, resume si <60%
-            const float BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH / 100.0f;
-            const float BACKPRESSURE_LOW = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW / 100.0f;
+            // [BACKPRESSURE] Ne pas bloquer en boucle: si buffer trop haut, stopper ce cycle.
+            // Le consumer audio continue de drainer, et un prochain cycle reprendra le download.
+            const int BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
+            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+            size_t rb_used = handle->buffer_size - rb_free;
+            int rb_fill_pct = (int)((rb_used * 100) / handle->buffer_size);
 
-            while (handle->ring_buffer) {
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t rb_used = handle->buffer_size - rb_free;
-                float rb_fill = (float)rb_used / (float)handle->buffer_size;
-
-                if (rb_fill >= BACKPRESSURE_HIGH) {
-                    ESP_LOGW(TAG, "[BACKPRESSURE] RB %.0f%% ≥ %.0f%% - pause fetcher (waiting consumer...)",
-                             rb_fill * 100, BACKPRESSURE_HIGH * 100);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    continue;  // Recheck fill
-                }
-
-                // Ringbuffer OK (< high threshold), sortir de la boucle
-                if (rb_fill < BACKPRESSURE_LOW) {
-                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% < %.0f%% - resume download",
-                             rb_fill * 100, BACKPRESSURE_LOW * 100);
-                } else {
-                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% in range [%.0f%%-%.0f%%] - proceed",
-                             rb_fill * 100, BACKPRESSURE_LOW * 100, BACKPRESSURE_HIGH * 100);
-                }
-                break;  // OK to download
+            if (rb_fill_pct >= BACKPRESSURE_HIGH) {
+                ESP_LOGW(TAG, "[BACKPRESSURE] RB %d%% ≥ %d%% - report téléchargement au prochain cycle",
+                         rb_fill_pct, BACKPRESSURE_HIGH);
+                handle->is_downloading = false;
+                break;  // Sort de la boucle segments, évite pause active + spam logs
             }
 #endif
 
