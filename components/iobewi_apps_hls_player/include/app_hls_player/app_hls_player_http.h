@@ -37,8 +37,9 @@ extern "C" {
  * @param[in] url    URL complète du segment (HTTP ou HTTPS)
  *
  * @return
- *     - ESP_OK  : Segment téléchargé avec succès (status HTTP 200/206)
- *     - ESP_FAIL : Erreur HTTP, status inattendu, ou échec d'initialisation
+ *     - ESP_OK          : Segment téléchargé avec succès (status HTTP 200/206)
+ *     - ESP_ERR_TIMEOUT : Budget d'attente ringbuffer dépassé (live-first abort)
+ *     - ESP_FAIL        : Erreur HTTP, status inattendu, ou échec d'initialisation
  *
  * @note
  *     - Timeout : 5 secondes
@@ -47,6 +48,16 @@ extern "C" {
  *     - Alignement TS : carry buffer 188-byte dans handle->ts_carry
  */
 esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url);
+
+/**
+ * @brief Libère le client HTTP persistant utilisé pour les segments TS
+ *
+ * À appeler à l'arrêt/destroy du player, ou lors d'un recreate explicite.
+ * Safe si aucun client n'est actif.
+ *
+ * @param[in] handle Handle du player
+ */
+void hls_http_ts_client_cleanup(app_hls_player_t *handle);
 
 /**
  * @brief Télécharge une playlist M3U8 et retourne son contenu

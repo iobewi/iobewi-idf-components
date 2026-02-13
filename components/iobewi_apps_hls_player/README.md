@@ -399,7 +399,15 @@ Note : Gather buffer < 4 KB non recommandé (risque `consumed=0` en boucle)
 CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE=256     # KB, défaut 128
 CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE=8     # KB, défaut 8
 CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE=16       # KB, défaut 16
+CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS=1500   # ms, 0 = désactivé
 ```
+
+**RB wait budget live-first** (`CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS`) :
+- Budget cumulé d'attente backpressure par segment TS.
+- Si `rb_wait_ms` dépasse ce budget, le segment est abandonné (`RB_BUDGET exceeded`).
+- Le fetcher resynchronise ensuite near-edge et notifie `NOTIF_RESET` pour éviter
+  de rester bloqué plusieurs secondes hors fenêtre live.
+- Mettre `0` pour conserver le comportement legacy (attente illimitée).
 
 Note : Tous les buffers sont alloués dynamiquement au démarrage.
 

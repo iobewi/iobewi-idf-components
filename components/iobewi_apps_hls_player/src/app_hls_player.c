@@ -183,6 +183,7 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     handle->drop_recover_count = 0;
     handle->bad_item_size_count = 0;
     handle->resync_notif_guard = 0;
+    handle->rb_budget_abort_count = 0;
     handle->ts_carry_len = 0;  // Reset carry pour alignement TS
 
     // Signal initial pour déclencher le premier téléchargement
@@ -270,6 +271,8 @@ esp_err_t app_hls_player_stop(app_hls_player_t *handle)
         handle->play_task = NULL;
     }
 
+    hls_http_ts_client_cleanup(handle);
+
     ESP_LOGI(TAG, "Player HLS arrêté");
     return ESP_OK;
 }
@@ -309,6 +312,8 @@ esp_err_t app_hls_player_del(app_hls_player_t *handle)
     }
 
     // Libérer les ressources
+    hls_http_ts_client_cleanup(handle);
+
     if (handle->ring_buffer) {
         vRingbufferDelete(handle->ring_buffer);
     }
