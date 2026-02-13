@@ -70,6 +70,16 @@ struct app_hls_player_s {
     uint32_t resync_notif_guard;            /**< Rate-limit NOTIF_RESYNC fallback */
     uint8_t ts_carry[188];                  /**< Carry buffer pour alignement TS 188-byte */
     size_t ts_carry_len;                    /**< Nombre de bytes dans ts_carry */
+    struct {
+        int64_t total_ms;                   /**< Temps total hls_http_download_segment() */
+        int64_t open_ms;                    /**< Temps esp_http_client_open() (connect/TLS) */
+        int64_t headers_ms;                 /**< Temps fetch_headers/status */
+        int64_t body_read_ms;               /**< Temps lecture corps HTTP */
+        int64_t rb_wait_ms;                 /**< Temps cumulé en attente ringbuffer */
+        int64_t max_read_block_ms;          /**< Plus long blocage d'un read() */
+        size_t body_bytes;                  /**< Bytes lus sur le corps HTTP */
+        int read_calls;                     /**< Nombre d'appels esp_http_client_read() */
+    } last_seg_metrics;                     /**< Instrumentation segment (dernier téléchargement) */
 };
 
 /**

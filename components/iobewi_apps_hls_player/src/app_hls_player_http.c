@@ -128,75 +128,74 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
 }
 
 /**
- * @brief Callback HTTP pour recevoir les données
- * Envoie TS avec backpressure (sans stratégie drop-old)
+ * @brief Envoi TS avec mesure du temps passé en backpressure
  */
-static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+static esp_err_t rb_send_ts_backpressure_timed(app_hls_player_t *handle,
+                                               const uint8_t *pkt188,
+                                               int64_t *rb_wait_us)
 {
-    app_hls_player_t *handle = (app_hls_player_t *)evt->user_data;
-
-    switch (evt->event_id) {
-        case HTTP_EVENT_ON_DATA:
-            if (evt->data_len > 0 && handle->ring_buffer) {
-                const uint8_t *src = (const uint8_t *)evt->data;
-                size_t src_len = (size_t)evt->data_len;
-
-                if (handle->ts_carry_len > 0) {
-                    size_t need = 188 - handle->ts_carry_len;
-                    size_t take = (src_len < need) ? src_len : need;
-
-                    memcpy(handle->ts_carry + handle->ts_carry_len, src, take);
-                    handle->ts_carry_len += take;
-                    src += take;
-                    src_len -= take;
-
-                    if (handle->ts_carry_len == 188) {
-                        esp_err_t err = rb_send_ts_backpressure(handle, handle->ts_carry);
-                        if (err != ESP_OK) {
-                            ESP_LOGW(TAG, "TS push stopped [carry]: %s", esp_err_to_name(err));
-                            break;
-                        }
-                        handle->ts_carry_len = 0;
-                    }
-                }
-
-                bool abort_chunk = false;
-                while (src_len >= 188) {
-                    esp_err_t err = rb_send_ts_backpressure(handle, src);
-                    if (err != ESP_OK) {
-                        ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
-                        abort_chunk = true;
-                        break;
-                    }
-
-                    src += 188;
-                    src_len -= 188;
-                }
-
-                if (abort_chunk) {
-                    break;
-                }
-
-                if (src_len > 0) {
-                    memcpy(handle->ts_carry, src, src_len);
-                    handle->ts_carry_len = src_len;
-                }
-            }
-            break;
-        default:
-            break;
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = rb_send_ts_backpressure(handle, pkt188);
+    if (rb_wait_us != NULL) {
+        *rb_wait_us += (esp_timer_get_time() - t0);
     }
+    return err;
+}
+
+static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
+                                      const uint8_t *src,
+                                      size_t src_len,
+                                      int64_t *rb_wait_us)
+{
+    if (handle == NULL || src == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (handle->ts_carry_len > 0) {
+        size_t need = 188 - handle->ts_carry_len;
+        size_t take = (src_len < need) ? src_len : need;
+
+        memcpy(handle->ts_carry + handle->ts_carry_len, src, take);
+        handle->ts_carry_len += take;
+        src += take;
+        src_len -= take;
+
+        if (handle->ts_carry_len == 188) {
+            esp_err_t err = rb_send_ts_backpressure_timed(handle, handle->ts_carry, rb_wait_us);
+            if (err != ESP_OK) {
+                return err;
+            }
+            handle->ts_carry_len = 0;
+        }
+    }
+
+    while (src_len >= 188) {
+        esp_err_t err = rb_send_ts_backpressure_timed(handle, src, rb_wait_us);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        src += 188;
+        src_len -= 188;
+    }
+
+    if (src_len > 0) {
+        memcpy(handle->ts_carry, src, src_len);
+        handle->ts_carry_len = src_len;
+    }
+
     return ESP_OK;
 }
 
 esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 {
+    int64_t seg_t0 = esp_timer_get_time();
+    memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
+
     ESP_LOGI(TAG, "Téléchargement: %s", url);
 
     esp_http_client_config_t config = {
         .url = url,
-        .event_handler = http_event_handler,
-        .user_data = handle,
         .buffer_size = HTTP_BUFFER_SIZE,
         .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -209,33 +208,73 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         return ESP_FAIL;
     }
 
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        int status = esp_http_client_get_status_code(client);
-        int length = esp_http_client_get_content_length(client);
-        ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
+    int64_t open_t0 = esp_timer_get_time();
+    esp_err_t err = esp_http_client_open(client, 0);
+    handle->last_seg_metrics.open_ms = (esp_timer_get_time() - open_t0) / 1000;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Échec d'ouverture HTTP segment: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
+        return err;
+    }
 
-        // Traiter status != 200/206 comme erreur (évite dérive silencieuse)
-        if (status != 200 && status != 206) {
-            // Logger Location si redirection (debug terrain) - buffer local pour compat IDF
-            if (status >= 300 && status < 400) {
-                char location_buf[256];
-                if (get_location_header(client, location_buf, sizeof(location_buf))) {
-                    ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status, location_buf);
-                } else {
-                    ESP_LOGW(TAG, "HTTP redirection %d → (Location manquant)", status);
-                }
+    int64_t hdr_t0 = esp_timer_get_time();
+    int length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    handle->last_seg_metrics.headers_ms = (esp_timer_get_time() - hdr_t0) / 1000;
+    ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
+
+    if (status != 200 && status != 206) {
+        if (status >= 300 && status < 400) {
+            char location_buf[256];
+            if (get_location_header(client, location_buf, sizeof(location_buf))) {
+                ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status, location_buf);
             } else {
-                ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
+                ESP_LOGW(TAG, "HTTP redirection %d → (Location manquant)", status);
             }
-            err = ESP_FAIL;
+        } else {
+            ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
         }
+        err = ESP_FAIL;
     } else {
-        ESP_LOGE(TAG, "Erreur HTTP: %s", esp_err_to_name(err));
+        int64_t body_t0 = esp_timer_get_time();
+        int64_t rb_wait_us = 0;
+        uint8_t buffer[HTTP_BUFFER_SIZE];
+
+        while (true) {
+            int64_t read_t0 = esp_timer_get_time();
+            int read = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+            int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
+
+            handle->last_seg_metrics.read_calls++;
+            if (read_block_ms > handle->last_seg_metrics.max_read_block_ms) {
+                handle->last_seg_metrics.max_read_block_ms = read_block_ms;
+            }
+
+            if (read < 0) {
+                ESP_LOGE(TAG, "Erreur read segment: %d", read);
+                err = ESP_FAIL;
+                break;
+            }
+            if (read == 0) {
+                break;
+            }
+
+            handle->last_seg_metrics.body_bytes += (size_t)read;
+            err = hls_process_ts_chunk(handle, buffer, (size_t)read, &rb_wait_us);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
+                break;
+            }
+        }
+
+        handle->last_seg_metrics.body_read_ms = (esp_timer_get_time() - body_t0) / 1000;
+        handle->last_seg_metrics.rb_wait_ms = rb_wait_us / 1000;
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;
 }
 
