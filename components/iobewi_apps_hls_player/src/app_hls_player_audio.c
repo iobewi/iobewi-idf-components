@@ -90,6 +90,11 @@ void hls_audio_play_task(void *pvParameters)
     // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
     int just_resynced_cycles = 0;
 
+    int decode_count = 0;
+    int error_count = 0;
+    bool download_signaled = false;
+    bool was_downloading = false;
+
     // [FIX UNDERRUN] Prébuffer 70-80% avant démarrage (vs 500ms fixe)
     // Donne >400ms marge pour survivre aux refresh M3U8 (389ms)
     ESP_LOGI(TAG, "Attente prébuffer 70%% avant démarrage audio...");
@@ -129,11 +134,6 @@ void hls_audio_play_task(void *pvParameters)
     if (stop_requested) {
         goto task_cleanup;
     }
-
-    int decode_count = 0;
-    int error_count = 0;
-    bool download_signaled = false;
-    bool was_downloading = false;
 
     // [DIAG] Heartbeat audio loop
     int64_t last_heartbeat_us = 0;
