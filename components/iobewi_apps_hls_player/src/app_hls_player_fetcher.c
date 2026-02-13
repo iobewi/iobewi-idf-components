@@ -335,18 +335,47 @@ void hls_fetch_task(void *pvParameters)
         }
 #endif
 
-        // Phase 1: Collecter indices des N segments les plus récents non téléchargés
+        // Phase 1 (FIX): Collecter segments SEQUENTIELS pour éviter les trous audio
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
         int to_download_count = 0;
 
-        for (int i = playlist.segment_count - 1; i >= 0 && to_download_count < segments_per_cycle; i--) {
-            if (playlist.segments[i].sequence > last_sequence_number) {
+        if (last_sequence_number < 0) {
+            // Cold start: prendre les N derniers disponibles mais dans l'ordre chronologique
+            int start_idx = playlist.segment_count - segments_per_cycle;
+            if (start_idx < 0) {
+                start_idx = 0;
+            }
+
+            for (int i = start_idx; i < playlist.segment_count && to_download_count < segments_per_cycle; i++) {
                 to_download[to_download_count++] = i;
+            }
+        } else {
+            int64_t wanted_seq = last_sequence_number + 1;
+
+            for (int i = 0; i < playlist.segment_count && to_download_count < segments_per_cycle; i++) {
+                if (playlist.segments[i].sequence == wanted_seq) {
+                    for (int j = i; j < playlist.segment_count && to_download_count < segments_per_cycle; j++) {
+                        int64_t expected = wanted_seq + (j - i);
+                        if (playlist.segments[j].sequence != expected) {
+                            break;
+                        }
+                        to_download[to_download_count++] = j;
+                    }
+                    break;
+                }
             }
         }
 
-        // Phase 2: Télécharger dans l'ordre inverse = ordre chronologique croissant
-        for (int k = to_download_count - 1; k >= 0; k--) {
+        if (to_download_count > 0) {
+            ESP_LOGI(TAG, "Cycle download %d seg: seq %lld .. %lld (rb=%d%%)",
+                     to_download_count,
+                     (long long)playlist.segments[to_download[0]].sequence,
+                     (long long)playlist.segments[to_download[to_download_count - 1]].sequence,
+                     level);
+        }
+
+        // Phase 2: Télécharger dans l'ordre chronologique (séquentiel)
+        for (int k = 0; k < to_download_count; k++) {
             // Check stop avant chaque segment
             if (hls_should_stop_now()) {
                 ESP_LOGI(TAG, "NOTIF_STOP reçue pendant download - arrêt fetch_task");
@@ -361,7 +390,7 @@ void hls_fetch_task(void *pvParameters)
             const lib_m3u8_parser_segment_t *seg = &playlist.segments[idx];
 
             ESP_LOGI(TAG, "Téléchargement segment %u (%d/%d)%s",
-                     seg->sequence, (to_download_count - k), to_download_count,
+                     seg->sequence, (k + 1), to_download_count,
                      (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISCONTINUITY]" : "");
 
             // Signaler DISCONTINUITY pour reset décodeur via task notification (P1: check flag)
@@ -378,7 +407,7 @@ void hls_fetch_task(void *pvParameters)
                 }
                 downloaded = true;
                 ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés)",
-                         (long long)seg->sequence, (to_download_count - k), to_download_count);
+                         (long long)seg->sequence, (k + 1), to_download_count);
             } else {
                 ESP_LOGE(TAG, "Échec téléchargement segment %lld", (long long)seg->sequence);
                 handle->is_downloading = false;
