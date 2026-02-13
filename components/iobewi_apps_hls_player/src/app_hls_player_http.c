@@ -302,7 +302,7 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
         reason = "init";
     } else if ((handle->ts_port != parsed_port) ||
                (handle->ts_transport != parsed_transport) ||
-               (strncmp(handle->ts_host, parsed_host, sizeof(handle->ts_host)) != 0)) {
+               (strcmp(handle->ts_host, parsed_host) != 0)) {
         needs_recreate = true;
         reason = "host_change";
     }
@@ -322,6 +322,8 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
 
     esp_http_client_config_t config = {
         .url = url,
+        .host = parsed_host,
+        .port = parsed_port,
         .buffer_size = HTTP_BUFFER_SIZE,
         .timeout_ms = 5000,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -350,8 +352,13 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
 
 static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
                                                 esp_http_client_handle_t client,
-                                                const char *url)
+                                                const char *url,
+                                                bool *network_error)
 {
+    if (network_error) {
+        *network_error = false;
+    }
+
     esp_err_t err = esp_http_client_set_url(client, url);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TS_CLIENT set_url failed: %s", esp_err_to_name(err));
@@ -362,6 +369,9 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
     err = esp_http_client_open(client, 0);
     handle->last_seg_metrics.open_ms += (esp_timer_get_time() - open_t0) / 1000;
     if (err != ESP_OK) {
+        if (network_error) {
+            *network_error = true;
+        }
         ESP_LOGW(TAG, "TS_CLIENT open failed: %s", esp_err_to_name(err));
         return err;
     }
@@ -402,12 +412,23 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         }
 
         if (read < 0) {
+            if (network_error) {
+                *network_error = true;
+            }
             ESP_LOGW(TAG, "Erreur read segment: %d", read);
             err = ESP_FAIL;
             break;
         }
         if (read == 0) {
-            err = ESP_OK;
+            if (length > 0 && handle->last_seg_metrics.body_bytes < (size_t)length) {
+                if (network_error) {
+                    *network_error = true;
+                }
+                ESP_LOGW(TAG, "EOF précoce segment: got=%u expected=%d", (unsigned)handle->last_seg_metrics.body_bytes, length);
+                err = ESP_FAIL;
+            } else {
+                err = ESP_OK;
+            }
             break;
         }
 
@@ -440,8 +461,9 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     }
     handle->last_seg_metrics.reuse = reuse_hit;
 
-    esp_err_t err = hls_http_download_segment_once(handle, client, url);
-    if (err != ESP_OK) {
+    bool network_error = false;
+    esp_err_t err = hls_http_download_segment_once(handle, client, url, &network_error);
+    if (err != ESP_OK && network_error) {
         ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
         handle->last_seg_metrics.retried = true;
         hls_http_ts_client_cleanup(handle);
@@ -452,7 +474,7 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
             return err;
         }
 
-        err = hls_http_download_segment_once(handle, client, url);
+        err = hls_http_download_segment_once(handle, client, url, NULL);
     }
 
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
