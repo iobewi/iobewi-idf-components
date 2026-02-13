@@ -66,6 +66,7 @@ void hls_fetch_task(void *pvParameters)
              pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t), sizeof(StackType_t));
 
     int64_t last_sequence_number = -1;
+    int resync_cooldown = 0;  // Cycles en mode prudent après décrochage
 
     // Playlist hors boucle pour cleanup centralisé à task_exit
     lib_m3u8_parser_playlist_t playlist;
@@ -322,6 +323,12 @@ void hls_fetch_task(void *pvParameters)
             segments_per_cycle = 2;
         }
 
+        // Après un décrochage, imposer temporairement 1 segment/cycle pour se recaler proprement.
+        if (last_sequence_number >= 0 && resync_cooldown > 0) {
+            segments_per_cycle = 1;
+            resync_cooldown--;
+        }
+
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
@@ -476,27 +483,36 @@ void hls_fetch_task(void *pvParameters)
                          (long long)last_sequence_number,
                          (long long)oldest_in_playlist,
                          (long long)newest_in_playlist);
-                // Resync near live edge: rester légèrement derrière newest pour éviter double décrochage.
-                const int64_t CATCHUP_BACKOFF = 2;
-                int64_t catchup_seq = newest_in_playlist - CATCHUP_BACKOFF;
+                // Resync near live edge: backoff adaptatif selon niveau buffer.
+                int64_t catchup_backoff = 2;
+                if (level > 75) {
+                    catchup_backoff = 4;
+                } else if (level > 60) {
+                    catchup_backoff = 3;
+                }
+                int64_t catchup_seq = newest_in_playlist - catchup_backoff;
                 if (catchup_seq < oldest_in_playlist) {
                     catchup_seq = oldest_in_playlist;
                 }
                 last_sequence_number = catchup_seq - 1;
 
-                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld)",
+                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld)",
                          (long long)catchup_seq,
                          (long long)oldest_in_playlist,
-                         (long long)newest_in_playlist);
+                         (long long)newest_in_playlist,
+                         (long long)catchup_backoff);
 
                 if (handle->play_task) {
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
                 }
 
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
+                // avec un micro-backoff pour éviter les rafales refresh/resync.
+                resync_cooldown = 3;
                 lib_m3u8_parser_free(&playlist);
                 playlist_valid = false;
                 handle->is_downloading = false;
+                hls_interruptible_delay_ms(100);
                 xSemaphoreGive(handle->download_semaphore);  // Trigger immédiat
                 continue;
             }
