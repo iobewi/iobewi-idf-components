@@ -453,6 +453,8 @@ void hls_fetch_task(void *pvParameters)
             lib_m3u8_parser_free(&playlist);
             playlist_valid = false;
             handle->is_downloading = false;
+            // Petit backoff pour éviter une boucle serrée si la playlist reste invalide.
+            hls_interruptible_delay_ms(50);
             continue;
         }
 
