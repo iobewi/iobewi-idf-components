@@ -376,11 +376,12 @@ void hls_fetch_task(void *pvParameters)
             int64_t oldest_in_playlist = playlist.segments[0].sequence;
             int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
             if (oldest_in_playlist <= last_sequence_number + 1) {
-                ESP_LOGI(TAG, "No next segment yet (wanted=%lld, last=%lld, window=[%lld..%lld]) - wait",
+                ESP_LOGI(TAG, "No next segment yet (wanted=%lld, last=%lld, window=[%lld..%lld], count=%d) - wait",
                          (long long)wanted_seq,
                          (long long)last_sequence_number,
                          (long long)oldest_in_playlist,
-                         (long long)newest_in_playlist);
+                         (long long)newest_in_playlist,
+                         playlist.segment_count);
                 handle->is_downloading = false;
                 if (!hls_interruptible_delay_ms(250)) {
                     goto task_exit;
@@ -439,6 +440,11 @@ void hls_fetch_task(void *pvParameters)
             }
         }
 
+        if (hole_detected) {
+            ESP_LOGW(TAG, "Cycle interrompu: trou de séquence (last=%lld, wanted=%lld)",
+                     (long long)last_sequence_number, (long long)wanted_seq);
+        }
+
         // FIX #12: Détection décrochage et resynchronisation
         // Si aucun segment téléchargé alors que la playlist en contient, vérifier si on est trop en retard
         if (!any_downloaded_this_cycle && playlist.segment_count > 0 && last_sequence_number >= 0) {
@@ -466,12 +472,7 @@ void hls_fetch_task(void *pvParameters)
                 continue;
             }
 
-            if (hole_detected) {
-                ESP_LOGW(TAG, "Cycle terminé avec trou de séquence sans décrochage fenêtre (last=%lld)",
-                         (long long)last_sequence_number);
-            } else {
-                ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
-            }
+            ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
 
         lib_m3u8_parser_free(&playlist);
