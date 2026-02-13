@@ -16,6 +16,12 @@
 
 static const char *TAG = "hls_fetcher";
 
+#define COMPUTE_CYCLE_OTHER(_cycle_ms, _other_ms) do { \
+    (_cycle_ms) = (esp_timer_get_time() - cycle_start_us) / 1000; \
+    (_other_ms) = (_cycle_ms) - master_m3u8_ms - media_m3u8_ms - ts_sum_ms; \
+    if ((_other_ms) < 0) (_other_ms) = 0; \
+} while (0)
+
 /**
  * @brief Download M3U8 avec retry rapide exponentiel en cas d'échec
  *
@@ -497,11 +503,9 @@ void hls_fetch_task(void *pvParameters)
                          (long long)last_sequence_number);
             }
 
-            int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
-            int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
-            if (other_ms < 0) {
-                other_ms = 0;
-            }
+            int64_t cycle_ms = 0;
+            int64_t other_ms = 0;
+            COMPUTE_CYCLE_OTHER(cycle_ms, other_ms);
 
             ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                      (long long)cycle_ms,
@@ -543,13 +547,16 @@ void hls_fetch_task(void *pvParameters)
                 if (catchup_seq < oldest_in_playlist) {
                     catchup_seq = oldest_in_playlist;
                 }
+                int64_t last_before = last_sequence_number;
                 last_sequence_number = catchup_seq - 1;
 
-                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld)",
+                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld last_before=%lld last_after=%lld)",
                          (long long)catchup_seq,
                          (long long)oldest_in_playlist,
                          (long long)newest_in_playlist,
-                         (long long)catchup_backoff);
+                         (long long)catchup_backoff,
+                         (long long)last_before,
+                         (long long)last_sequence_number);
 
                 if (handle->play_task) {
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
@@ -584,11 +591,9 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
 
-        int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
-        int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
-        if (other_ms < 0) {
-            other_ms = 0;
-        }
+        int64_t cycle_ms = 0;
+        int64_t other_ms = 0;
+        COMPUTE_CYCLE_OTHER(cycle_ms, other_ms);
 
         ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                  (long long)cycle_ms,
