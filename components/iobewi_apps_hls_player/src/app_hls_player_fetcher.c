@@ -372,6 +372,20 @@ void hls_fetch_task(void *pvParameters)
                      (long long)playlist.segments[to_download[0]].sequence,
                      (long long)playlist.segments[to_download[to_download_count - 1]].sequence,
                      level);
+        } else if (playlist.segment_count > 0 && last_sequence_number >= 0) {
+            int64_t oldest_in_playlist = playlist.segments[0].sequence;
+            int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
+            if (oldest_in_playlist <= last_sequence_number + 1) {
+                ESP_LOGI(TAG, "No next segment yet (last=%lld, window=[%lld..%lld]) - wait",
+                         (long long)last_sequence_number,
+                         (long long)oldest_in_playlist,
+                         (long long)newest_in_playlist);
+                handle->is_downloading = false;
+                if (!hls_interruptible_delay_ms(250)) {
+                    goto task_exit;
+                }
+                continue;
+            }
         }
 
         // Phase 2: Télécharger dans l'ordre chronologique (séquentiel)
@@ -389,8 +403,8 @@ void hls_fetch_task(void *pvParameters)
             int idx = to_download[k];
             const lib_m3u8_parser_segment_t *seg = &playlist.segments[idx];
 
-            ESP_LOGI(TAG, "Téléchargement segment %u (%d/%d)%s",
-                     seg->sequence, (k + 1), to_download_count,
+            ESP_LOGI(TAG, "Téléchargement segment %lld (%d/%d)%s",
+                     (long long)seg->sequence, (k + 1), to_download_count,
                      (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISCONTINUITY]" : "");
 
             // Signaler DISCONTINUITY pour reset décodeur via task notification (P1: check flag)
@@ -401,11 +415,16 @@ void hls_fetch_task(void *pvParameters)
 
             esp_err_t err = hls_http_download_segment(handle, seg->url);
             if (err == ESP_OK) {
-                // Mettre à jour avec le segment le plus récent téléchargé
-                if (seg->sequence > last_sequence_number) {
+                // N'avancer la séquence que sur continuité stricte (ou cold start)
+                if (last_sequence_number < 0 || seg->sequence == (last_sequence_number + 1)) {
                     last_sequence_number = seg->sequence;
+                    downloaded = true;
+                } else {
+                    ESP_LOGW(TAG, "Trou de séquence: last=%lld, got=%lld (pas d'avance)",
+                             (long long)last_sequence_number, (long long)seg->sequence);
+                    downloaded = false;
+                    break;
                 }
-                downloaded = true;
                 ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés)",
                          (long long)seg->sequence, (k + 1), to_download_count);
             } else {
