@@ -128,6 +128,7 @@ void hls_fetch_task(void *pvParameters)
         }
 
         handle->is_downloading = true;
+        int64_t cycle_start_us = esp_timer_get_time();
 
         // [DIAG LAG + FIX UNDERRUN] Retry rapide exponentiel (250ms, 500ms, 1s, 2s)
         int64_t t0 = esp_timer_get_time();
@@ -242,6 +243,8 @@ void hls_fetch_task(void *pvParameters)
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
                 lib_m3u8_parser_free(&playlist);
                 playlist_valid = false;
+                ESP_LOGI(TAG, "[TIMING] fetch cycle early-wait: %lld ms",
+                         (long long)((esp_timer_get_time() - cycle_start_us) / 1000));
                 handle->is_downloading = false;
                 if (!hls_interruptible_delay_ms(5000)) {
                     goto task_exit;  // Pas de free ici, déjà fait ligne ci-dessus
@@ -290,6 +293,7 @@ void hls_fetch_task(void *pvParameters)
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
         bool any_downloaded_this_cycle = false;
         bool hole_detected = false;
+        int downloaded_segments = 0;
 
         // FIX #13: Segments adaptatifs au buffer (évite overflow → drop-old → corruption)
         size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
@@ -427,12 +431,15 @@ void hls_fetch_task(void *pvParameters)
                 xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }
 
+            int64_t seg_t0 = esp_timer_get_time();
             esp_err_t err = hls_http_download_segment(handle, seg->url);
+            int64_t seg_ms = (esp_timer_get_time() - seg_t0) / 1000;
             if (err == ESP_OK) {
                 // N'avancer la séquence que sur continuité stricte (ou cold start)
                 if (last_sequence_number < 0 || seg->sequence == (last_sequence_number + 1)) {
                     last_sequence_number = seg->sequence;
                     any_downloaded_this_cycle = true;
+                    downloaded_segments++;
                 } else {
                     ESP_LOGW(TAG, "Trou de séquence: last=%lld, got=%lld (pas d'avance)",
                              (long long)last_sequence_number, (long long)seg->sequence);
@@ -443,10 +450,11 @@ void hls_fetch_task(void *pvParameters)
                     hole_detected = true;
                     break;
                 }
-                ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés)",
-                         (long long)seg->sequence, (k + 1), to_download_count);
+                ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés) [TS took=%lld ms]",
+                         (long long)seg->sequence, (k + 1), to_download_count, (long long)seg_ms);
             } else {
-                ESP_LOGE(TAG, "Échec téléchargement segment %lld", (long long)seg->sequence);
+                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms]",
+                         (long long)seg->sequence, (long long)seg_ms);
                 handle->is_downloading = false;
                 break;
             }
@@ -460,6 +468,10 @@ void hls_fetch_task(void *pvParameters)
                 ESP_LOGW(TAG, "Cycle interrompu: trou de séquence (last=%lld, cold_start)",
                          (long long)last_sequence_number);
             }
+
+            ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (segments_ok=%d)",
+                     (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
+                     downloaded_segments);
 
             // Hardening live: relancer immédiatement un refresh playlist sans attendre le timer.
             lib_m3u8_parser_free(&playlist);
@@ -506,6 +518,9 @@ void hls_fetch_task(void *pvParameters)
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
                 }
 
+                ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms",
+                         (long long)((esp_timer_get_time() - cycle_start_us) / 1000));
+
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
                 // avec un micro-backoff pour éviter les rafales refresh/resync.
                 resync_cooldown = 3;
@@ -521,6 +536,10 @@ void hls_fetch_task(void *pvParameters)
 
             ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
+
+        ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (segments_ok=%d)",
+                 (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
+                 downloaded_segments);
 
         lib_m3u8_parser_free(&playlist);
         playlist_valid = false;
