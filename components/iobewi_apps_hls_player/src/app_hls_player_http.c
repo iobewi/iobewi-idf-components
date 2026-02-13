@@ -122,34 +122,38 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
             return ESP_OK;
         }
 
+        int64_t now_us = esp_timer_get_time();
+        if (wait_begin_us == 0) {
+            wait_begin_us = now_us;
+            last_wait_log_us = now_us;
+        }
+
+        if ((now_us - last_wait_log_us) >= (250 * 1000)) {
+            int level = hls_ringbuf_level_pct(handle);
+            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+            int64_t waited_ms = (now_us - wait_begin_us) / 1000;
+
+            ESP_LOGW(TAG,
+                     "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
+                     level,
+                     (long long)waited_ms,
+                     (unsigned)rb_free,
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-        int level = hls_ringbuf_level_pct(handle);
-        if (level >= high_wm) {
-            if (wait_begin_us == 0) {
-                wait_begin_us = esp_timer_get_time();
-                last_wait_log_us = wait_begin_us;
-            }
+                     high_wm,
+                     low_wm
+#else
+                     -1,
+                     -1
+#endif
+            );
+            last_wait_log_us = now_us;
+        }
 
-            int64_t now_us = esp_timer_get_time();
-            if ((now_us - last_wait_log_us) >= (250 * 1000)) {
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                int64_t waited_ms = (now_us - wait_begin_us) / 1000;
-                ESP_LOGW(TAG,
-                         "COMMIT wait rb=%d%% waited_ms=%lld free=%u high=%d low=%d",
-                         level,
-                         (long long)waited_ms,
-                         (unsigned)rb_free,
-                         high_wm,
-                         low_wm);
-                last_wait_log_us = now_us;
-            }
-
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+        if (hls_ringbuf_level_pct(handle) >= high_wm) {
             if (!rb_wait_for_space(handle, -1)) {
                 return ESP_ERR_INVALID_STATE;
             }
-
-            wait_begin_us = 0;
-            last_wait_log_us = 0;
             continue;
         }
 #endif
