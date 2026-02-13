@@ -486,7 +486,8 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 
     bool network_error = false;
     esp_err_t err = hls_http_download_segment_once(handle, client, url, &network_error);
-    if (err != ESP_OK && network_error) {
+    bool partial_segment_written = (handle->last_seg_metrics.body_bytes > 0) || (handle->ts_carry_len > 0);
+    if (err != ESP_OK && network_error && !partial_segment_written) {
         ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
         handle->last_seg_metrics.retried = true;
         handle->last_seg_metrics.reuse = false;
@@ -499,6 +500,12 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         }
 
         err = hls_http_download_segment_once(handle, client, url, NULL);
+    } else if (err != ESP_OK && network_error && partial_segment_written) {
+        ESP_LOGW(TAG,
+                 "TS_CLIENT skip retry reason=partial_segment bytes=%u carry=%u err=%s",
+                 (unsigned)handle->last_seg_metrics.body_bytes,
+                 (unsigned)handle->ts_carry_len,
+                 esp_err_to_name(err));
     }
 
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
