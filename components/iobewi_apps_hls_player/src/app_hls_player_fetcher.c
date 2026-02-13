@@ -491,15 +491,29 @@ void hls_fetch_task(void *pvParameters)
                 }
 
                 if (seg_ms >= warn_ts_ms) {
-                    ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms)",
-                             (long long)seg->sequence, (long long)seg_ms, warn_ts_ms);
+                    ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d)",
+                             (long long)seg->sequence, (long long)seg_ms, warn_ts_ms,
+                             (long long)handle->last_seg_metrics.open_ms,
+                             (long long)handle->last_seg_metrics.headers_ms,
+                             (long long)handle->last_seg_metrics.body_read_ms,
+                             (long long)handle->last_seg_metrics.rb_wait_ms,
+                             (long long)handle->last_seg_metrics.max_read_block_ms,
+                             (unsigned)handle->last_seg_metrics.body_bytes,
+                             handle->last_seg_metrics.read_calls);
                 } else {
                     ESP_LOGD(TAG, "Segment %lld OK [TS took=%lld ms]",
                              (long long)seg->sequence, (long long)seg_ms);
                 }
             } else {
-                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms]",
-                         (long long)seg->sequence, (long long)seg_ms);
+                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d]",
+                         (long long)seg->sequence, (long long)seg_ms,
+                         (long long)handle->last_seg_metrics.open_ms,
+                         (long long)handle->last_seg_metrics.headers_ms,
+                         (long long)handle->last_seg_metrics.body_read_ms,
+                         (long long)handle->last_seg_metrics.rb_wait_ms,
+                         (long long)handle->last_seg_metrics.max_read_block_ms,
+                         (unsigned)handle->last_seg_metrics.body_bytes,
+                         handle->last_seg_metrics.read_calls);
                 handle->is_downloading = false;
                 break;
             }
@@ -647,4 +661,3 @@ task_exit:
 // ============================================================================
 // API Publique
 // ============================================================================
-
