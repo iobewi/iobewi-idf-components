@@ -276,6 +276,12 @@ void hls_fetch_task(void *pvParameters)
 
             playlist_valid = true;  // Parse media réussi
             free(m3u8_content);
+
+            // Mettre à jour target_duration aussi pour media playlist issue d'une master
+            if (playlist.target_duration > 0) {
+                handle->target_duration = playlist.target_duration;
+            }
+
             lib_m3u8_parser_dump(&playlist);
         }
 
@@ -311,6 +317,20 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux", segments_per_cycle);
         }
 
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+        // Gate backpressure au niveau cycle: éviter un cycle partiel (source de sauts audio)
+        // si le buffer est déjà haut, on reporte tout le cycle plutôt que télécharger 1 segment puis couper.
+        const int BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
+        if (level >= BACKPRESSURE_HIGH) {
+            ESP_LOGW(TAG, "[BACKPRESSURE] RB %d%% ≥ %d%% - report cycle complet", level, BACKPRESSURE_HIGH);
+            handle->is_downloading = false;
+            if (!hls_interruptible_delay_ms(500)) {
+                goto task_exit;
+            }
+            continue;
+        }
+#endif
+
         // Phase 1: Collecter indices des N segments les plus récents non téléchargés
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
         int to_download_count = 0;
@@ -345,36 +365,6 @@ void hls_fetch_task(void *pvParameters)
                 ESP_LOGW(TAG, "DISCONTINUITY détectée → notification NOTIF_RESET vers play_task");
                 xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }
-
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-            // [BACKPRESSURE] Pause fetcher si ringbuffer trop plein (évite drop-old escalation)
-            // Hystérésis : pause si ≥80%, resume si <60%
-            const float BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH / 100.0f;
-            const float BACKPRESSURE_LOW = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW / 100.0f;
-
-            while (handle->ring_buffer) {
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t rb_used = handle->buffer_size - rb_free;
-                float rb_fill = (float)rb_used / (float)handle->buffer_size;
-
-                if (rb_fill >= BACKPRESSURE_HIGH) {
-                    ESP_LOGW(TAG, "[BACKPRESSURE] RB %.0f%% ≥ %.0f%% - pause fetcher (waiting consumer...)",
-                             rb_fill * 100, BACKPRESSURE_HIGH * 100);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    continue;  // Recheck fill
-                }
-
-                // Ringbuffer OK (< high threshold), sortir de la boucle
-                if (rb_fill < BACKPRESSURE_LOW) {
-                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% < %.0f%% - resume download",
-                             rb_fill * 100, BACKPRESSURE_LOW * 100);
-                } else {
-                    ESP_LOGD(TAG, "[BACKPRESSURE] RB %.0f%% in range [%.0f%%-%.0f%%] - proceed",
-                             rb_fill * 100, BACKPRESSURE_LOW * 100, BACKPRESSURE_HIGH * 100);
-                }
-                break;  // OK to download
-            }
-#endif
 
             esp_err_t err = hls_http_download_segment(handle, seg->url);
             if (err == ESP_OK) {

@@ -90,6 +90,13 @@ void hls_audio_play_task(void *pvParameters)
     // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
     int just_resynced_cycles = 0;
 
+    // Initialisé avant toute sortie anticipée (ex: NOTIF_STOP pendant prébuffer)
+    // pour garantir que les logs de cleanup restent déterministes.
+    int decode_count = 0;
+    int error_count = 0;
+    bool download_signaled = false;
+    bool was_downloading = false;
+
     // [FIX UNDERRUN] Prébuffer 70-80% avant démarrage (vs 500ms fixe)
     // Donne >400ms marge pour survivre aux refresh M3U8 (389ms)
     ESP_LOGI(TAG, "Attente prébuffer 70%% avant démarrage audio...");
@@ -97,8 +104,18 @@ void hls_audio_play_task(void *pvParameters)
     const int PREBUFFER_TIMEOUT_MS = 10000;  // Timeout sécurité 10s
     int64_t prebuffer_start = esp_timer_get_time();
     int current_level = 0;
+    bool stop_requested = false;
+    bool stopped_during_prebuffer = false;
 
     while (true) {
+        // Permet un arrêt réactif même pendant la phase de prébuffer
+        if (hls_should_stop_now()) {
+            ESP_LOGI(TAG, "NOTIF_STOP reçue pendant prébuffer - arrêt audio_play_task");
+            stop_requested = true;
+            stopped_during_prebuffer = true;
+            break;
+        }
+
         size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
         size_t filled_size = handle->buffer_size - free_size;
         current_level = (filled_size * 100) / handle->buffer_size;
@@ -118,10 +135,9 @@ void hls_audio_play_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(50));  // Check toutes les 50ms
     }
 
-    int decode_count = 0;
-    int error_count = 0;
-    bool download_signaled = false;
-    bool was_downloading = false;
+    if (stop_requested) {
+        goto task_cleanup;
+    }
 
     // [DIAG] Heartbeat audio loop
     int64_t last_heartbeat_us = 0;
@@ -721,6 +737,7 @@ void hls_audio_play_task(void *pvParameters)
         }
     }
 
+task_cleanup:
     // Cleanup
     esp_audio_simple_dec_close(dec_handle);
 
@@ -729,7 +746,12 @@ void hls_audio_play_task(void *pvParameters)
     free(decoded_buffer);
 
     ESP_LOGI(TAG, "Arrêt de la task de lecture audio");
-    ESP_LOGI(TAG, "[STATS GATHER] Resync count=%d, total decode cycles=%d", resync_count, decode_count);
+    if (stopped_during_prebuffer) {
+        ESP_LOGI(TAG, "[STATS GATHER] Arrêt pendant prébuffer (resync=%d, decode=0)", resync_count);
+    } else {
+        ESP_LOGI(TAG, "[STATS GATHER] Resync count=%d, total decode cycles=%d",
+                 resync_count, decode_count);
+    }
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);

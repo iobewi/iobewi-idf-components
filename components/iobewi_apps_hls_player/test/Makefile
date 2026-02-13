@@ -2,7 +2,7 @@
 # Usage: make test
 
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11 -I../src -I../include
+CFLAGS = -Wall -Wextra -std=c11 -Istubs -I../src -I../include
 LDFLAGS =
 
 # Target

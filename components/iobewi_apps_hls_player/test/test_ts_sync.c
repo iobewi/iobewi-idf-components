@@ -15,15 +15,9 @@
 #include <stdbool.h>
 #include <assert.h>
 
-// Stub ESP_LOGx pour tests host-side
-#define ESP_LOGD(tag, fmt, ...) printf("[D] %s: " fmt "\n", tag, ##__VA_ARGS__)
-#define ESP_LOGI(tag, fmt, ...) printf("[I] %s: " fmt "\n", tag, ##__VA_ARGS__)
-#define ESP_LOGW(tag, fmt, ...) printf("[W] %s: " fmt "\n", tag, ##__VA_ARGS__)
-#define ESP_LOGE(tag, fmt, ...) printf("[E] %s: " fmt "\n", tag, ##__VA_ARGS__)
-
 // Include module TS_SYNC (header + source directement pour test host)
 // NOTE: En production, utiliser Unity framework ESP-IDF
-#include "../src/app_hls_player_ts_sync.h"
+#include "../include/app_hls_player/app_hls_player_ts_sync.h"
 
 // Pour éviter de linker toute l'implémentation, on inclut le .c directement
 // (méthode simplifiée pour tests host-side sans CMake complexe)
