@@ -16,11 +16,22 @@
 
 static const char *TAG = "hls_fetcher";
 
-#define COMPUTE_CYCLE_OTHER(_cycle_ms, _other_ms) do { \
-    (_cycle_ms) = (esp_timer_get_time() - cycle_start_us) / 1000; \
-    (_other_ms) = (_cycle_ms) - master_m3u8_ms - media_m3u8_ms - ts_sum_ms; \
-    if ((_other_ms) < 0) (_other_ms) = 0; \
-} while (0)
+static inline void hls_compute_cycle_other_ms(int64_t cycle_start_us,
+                                             int64_t master_m3u8_ms,
+                                             int64_t media_m3u8_ms,
+                                             int64_t ts_sum_ms,
+                                             int64_t *cycle_ms,
+                                             int64_t *other_ms)
+{
+    int64_t c = (esp_timer_get_time() - cycle_start_us) / 1000;
+    int64_t o = c - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
+    if (o < 0) {
+        o = 0;
+    }
+    *cycle_ms = c;
+    *other_ms = o;
+}
+
 
 /**
  * @brief Download M3U8 avec retry rapide exponentiel en cas d'échec
@@ -505,7 +516,7 @@ void hls_fetch_task(void *pvParameters)
 
             int64_t cycle_ms = 0;
             int64_t other_ms = 0;
-            COMPUTE_CYCLE_OTHER(cycle_ms, other_ms);
+            hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
 
             ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                      (long long)cycle_ms,
@@ -562,11 +573,10 @@ void hls_fetch_task(void *pvParameters)
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
                 }
 
-                int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
-                int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
-                if (other_ms < 0) {
-                    other_ms = 0;
-                }
+                int64_t cycle_ms = 0;
+                int64_t other_ms = 0;
+                hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms,
+                                           &cycle_ms, &other_ms);
 
                 ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                          (long long)cycle_ms,
@@ -593,7 +603,7 @@ void hls_fetch_task(void *pvParameters)
 
         int64_t cycle_ms = 0;
         int64_t other_ms = 0;
-        COMPUTE_CYCLE_OTHER(cycle_ms, other_ms);
+        hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
 
         ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                  (long long)cycle_ms,
