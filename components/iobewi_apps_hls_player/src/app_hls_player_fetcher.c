@@ -441,8 +441,19 @@ void hls_fetch_task(void *pvParameters)
         }
 
         if (hole_detected) {
-            ESP_LOGW(TAG, "Cycle interrompu: trou de séquence (last=%lld, wanted=%lld)",
-                     (long long)last_sequence_number, (long long)wanted_seq);
+            if (wanted_seq >= 0) {
+                ESP_LOGW(TAG, "Cycle interrompu: trou de séquence (last=%lld, wanted=%lld)",
+                         (long long)last_sequence_number, (long long)wanted_seq);
+            } else {
+                ESP_LOGW(TAG, "Cycle interrompu: trou de séquence (last=%lld, cold_start)",
+                         (long long)last_sequence_number);
+            }
+
+            // Hardening live: relancer immédiatement un refresh playlist sans attendre le timer.
+            lib_m3u8_parser_free(&playlist);
+            playlist_valid = false;
+            handle->is_downloading = false;
+            continue;
         }
 
         // FIX #12: Détection décrochage et resynchronisation
