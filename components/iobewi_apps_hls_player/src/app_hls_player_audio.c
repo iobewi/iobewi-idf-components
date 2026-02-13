@@ -90,6 +90,8 @@ void hls_audio_play_task(void *pvParameters)
     // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
     int just_resynced_cycles = 0;
 
+    // Initialisé avant toute sortie anticipée (ex: NOTIF_STOP pendant prébuffer)
+    // pour garantir que les logs de cleanup restent déterministes.
     int decode_count = 0;
     int error_count = 0;
     bool download_signaled = false;
@@ -103,12 +105,14 @@ void hls_audio_play_task(void *pvParameters)
     int64_t prebuffer_start = esp_timer_get_time();
     int current_level = 0;
     bool stop_requested = false;
+    bool stopped_during_prebuffer = false;
 
     while (true) {
         // Permet un arrêt réactif même pendant la phase de prébuffer
         if (hls_should_stop_now()) {
             ESP_LOGI(TAG, "NOTIF_STOP reçue pendant prébuffer - arrêt audio_play_task");
             stop_requested = true;
+            stopped_during_prebuffer = true;
             break;
         }
 
@@ -742,7 +746,12 @@ task_cleanup:
     free(decoded_buffer);
 
     ESP_LOGI(TAG, "Arrêt de la task de lecture audio");
-    ESP_LOGI(TAG, "[STATS GATHER] Resync count=%d, total decode cycles=%d", resync_count, decode_count);
+    if (stopped_during_prebuffer) {
+        ESP_LOGI(TAG, "[STATS GATHER] Arrêt pendant prébuffer (resync=%d, decode=0)", resync_count);
+    } else {
+        ESP_LOGI(TAG, "[STATS GATHER] Resync count=%d, total decode cycles=%d",
+                 resync_count, decode_count);
+    }
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
