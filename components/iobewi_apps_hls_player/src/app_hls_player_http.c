@@ -223,11 +223,12 @@ static bool hls_parse_ts_url(const char *url,
             return false;
         }
 
-        size_t host_len = (size_t)(close_br - host_start + 1);
-        if (host_len >= host_size) {
+        // IPv6 host retourné sans crochets pour compat avec config.host
+        size_t host_len = (size_t)(close_br - (host_start + 1));
+        if (host_len == 0 || host_len >= host_size) {
             return false;
         }
-        memcpy(host, host_start, host_len);
+        memcpy(host, host_start + 1, host_len);
         host[host_len] = '\0';
 
         const char *port_ptr = close_br + 1;
@@ -320,9 +321,12 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
         hls_http_ts_client_cleanup(handle);
     }
 
+    // Copie persistante avant init: évite de pointer sur parsed_host (stack)
+    strlcpy(handle->ts_host, parsed_host, sizeof(handle->ts_host));
+
     esp_http_client_config_t config = {
         .url = url,
-        .host = parsed_host,
+        .host = handle->ts_host,
         .port = parsed_port,
         .buffer_size = HTTP_BUFFER_SIZE,
         .timeout_ms = 5000,
@@ -341,7 +345,6 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
 
     handle->ts_http_client = client;
     handle->ts_client_ready = true;
-    strlcpy(handle->ts_host, parsed_host, sizeof(handle->ts_host));
     handle->ts_port = parsed_port;
     handle->ts_transport = parsed_transport;
 
