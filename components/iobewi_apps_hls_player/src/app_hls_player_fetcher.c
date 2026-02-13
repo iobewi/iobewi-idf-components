@@ -317,6 +317,20 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux", segments_per_cycle);
         }
 
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+        // Gate backpressure au niveau cycle: éviter un cycle partiel (source de sauts audio)
+        // si le buffer est déjà haut, on reporte tout le cycle plutôt que télécharger 1 segment puis couper.
+        const int BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
+        if (level >= BACKPRESSURE_HIGH) {
+            ESP_LOGW(TAG, "[BACKPRESSURE] RB %d%% ≥ %d%% - report cycle complet", level, BACKPRESSURE_HIGH);
+            handle->is_downloading = false;
+            if (!hls_interruptible_delay_ms(500)) {
+                goto task_exit;
+            }
+            continue;
+        }
+#endif
+
         // Phase 1: Collecter indices des N segments les plus récents non téléchargés
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
         int to_download_count = 0;
@@ -351,22 +365,6 @@ void hls_fetch_task(void *pvParameters)
                 ESP_LOGW(TAG, "DISCONTINUITY détectée → notification NOTIF_RESET vers play_task");
                 xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
             }
-
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-            // [BACKPRESSURE] Ne pas bloquer en boucle: si buffer trop haut, stopper ce cycle.
-            // Le consumer audio continue de drainer, et un prochain cycle reprendra le download.
-            const int BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
-            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-            size_t rb_used = handle->buffer_size - rb_free;
-            int rb_fill_pct = (int)((rb_used * 100) / handle->buffer_size);
-
-            if (rb_fill_pct >= BACKPRESSURE_HIGH) {
-                ESP_LOGW(TAG, "[BACKPRESSURE] RB %d%% ≥ %d%% - report téléchargement au prochain cycle",
-                         rb_fill_pct, BACKPRESSURE_HIGH);
-                handle->is_downloading = false;
-                break;  // Sort de la boucle segments, évite pause active + spam logs
-            }
-#endif
 
             esp_err_t err = hls_http_download_segment(handle, seg->url);
             if (err == ESP_OK) {
