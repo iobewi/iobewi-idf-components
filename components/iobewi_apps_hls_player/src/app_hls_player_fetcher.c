@@ -129,12 +129,15 @@ void hls_fetch_task(void *pvParameters)
 
         handle->is_downloading = true;
         int64_t cycle_start_us = esp_timer_get_time();
+        int64_t master_m3u8_ms = 0;
+        int64_t media_m3u8_ms = 0;
 
         // [DIAG LAG + FIX UNDERRUN] Retry rapide exponentiel (250ms, 500ms, 1s, 2s)
         int64_t t0 = esp_timer_get_time();
         char *m3u8_content = hls_http_download_m3u8_with_retry(handle->stream_url);
         int64_t t1 = esp_timer_get_time();
-        ESP_LOGD(TAG, "[REFRESH] m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
+        master_m3u8_ms = (t1 - t0) / 1000;
+        ESP_LOGD(TAG, "[REFRESH] m3u8 took %lld ms", (long long)master_m3u8_ms);
 
         if (m3u8_content == NULL) {
             ESP_LOGE(TAG, "Échec de téléchargement M3U8");
@@ -237,7 +240,8 @@ void hls_fetch_task(void *pvParameters)
             t0 = esp_timer_get_time();
             m3u8_content = hls_http_download_m3u8_with_retry(media_url);
             t1 = esp_timer_get_time();
-            ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)((t1 - t0) / 1000));
+            media_m3u8_ms = (t1 - t0) / 1000;
+            ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)media_m3u8_ms);
 
             if (m3u8_content == NULL) {
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
@@ -293,7 +297,9 @@ void hls_fetch_task(void *pvParameters)
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
         bool any_downloaded_this_cycle = false;
         bool hole_detected = false;
-        int downloaded_segments = 0;
+        int downloaded_segments = 0;  // Segments HTTP téléchargés avec succès
+        int advanced_segments = 0;    // Segments ayant avancé last_sequence_number
+        int64_t ts_sum_ms = 0;        // Somme durées download TS du cycle
 
         // FIX #13: Segments adaptatifs au buffer (évite overflow → drop-old → corruption)
         size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
@@ -434,12 +440,25 @@ void hls_fetch_task(void *pvParameters)
             int64_t seg_t0 = esp_timer_get_time();
             esp_err_t err = hls_http_download_segment(handle, seg->url);
             int64_t seg_ms = (esp_timer_get_time() - seg_t0) / 1000;
+            ts_sum_ms += seg_ms;
+
+            int warn_ts_ms = 2500;
+            if (handle->target_duration > 0) {
+                int td_ms = handle->target_duration * 1000;
+                int td_based = td_ms - 800;
+                if (td_based > warn_ts_ms) {
+                    warn_ts_ms = td_based;
+                }
+            }
+
             if (err == ESP_OK) {
+                downloaded_segments++;
+
                 // N'avancer la séquence que sur continuité stricte (ou cold start)
                 if (last_sequence_number < 0 || seg->sequence == (last_sequence_number + 1)) {
                     last_sequence_number = seg->sequence;
                     any_downloaded_this_cycle = true;
-                    downloaded_segments++;
+                    advanced_segments++;
                 } else {
                     ESP_LOGW(TAG, "Trou de séquence: last=%lld, got=%lld (pas d'avance)",
                              (long long)last_sequence_number, (long long)seg->sequence);
@@ -450,8 +469,14 @@ void hls_fetch_task(void *pvParameters)
                     hole_detected = true;
                     break;
                 }
-                ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés) [TS took=%lld ms]",
-                         (long long)seg->sequence, (k + 1), to_download_count, (long long)seg_ms);
+
+                if (seg_ms >= warn_ts_ms) {
+                    ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms)",
+                             (long long)seg->sequence, (long long)seg_ms, warn_ts_ms);
+                } else {
+                    ESP_LOGD(TAG, "Segment %lld OK [TS took=%lld ms]",
+                             (long long)seg->sequence, (long long)seg_ms);
+                }
             } else {
                 ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms]",
                          (long long)seg->sequence, (long long)seg_ms);
@@ -469,9 +494,10 @@ void hls_fetch_task(void *pvParameters)
                          (long long)last_sequence_number);
             }
 
-            ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (segments_ok=%d)",
+            ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
                      (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
-                     downloaded_segments);
+                     downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+                     (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
             // Hardening live: relancer immédiatement un refresh playlist sans attendre le timer.
             lib_m3u8_parser_free(&playlist);
@@ -518,8 +544,10 @@ void hls_fetch_task(void *pvParameters)
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
                 }
 
-                ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms",
-                         (long long)((esp_timer_get_time() - cycle_start_us) / 1000));
+                ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
+                         (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
+                         downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+                         (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
                 // avec un micro-backoff pour éviter les rafales refresh/resync.
@@ -537,9 +565,10 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
 
-        ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (segments_ok=%d)",
+        ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
                  (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
-                 downloaded_segments);
+                 downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+                 (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
         lib_m3u8_parser_free(&playlist);
         playlist_valid = false;
