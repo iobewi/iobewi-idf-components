@@ -312,27 +312,6 @@ void hls_fetch_task(void *pvParameters)
             segments_per_cycle = 4;
         }
 
-        // Anti-burst: limiter les segments selon la marge réelle jusqu'au seuil backpressure.
-        // Évite de pousser 2 segments (~2x128KB) quand il ne reste qu'une faible marge,
-        // ce qui provoque des overshoots RB (90-99%) et des erreurs AAC (error:30).
-        if (last_sequence_number >= 0) {
-            const size_t BP_HIGH_BYTES = (handle->buffer_size * CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH) / 100;
-            const size_t EST_SEGMENT_BYTES = 128 * 1024;  // Observé ~124-131 KB
-
-            if (filled >= BP_HIGH_BYTES) {
-                segments_per_cycle = 0;
-            } else {
-                size_t headroom = BP_HIGH_BYTES - filled;
-                int max_safe_segments = (int)(headroom / EST_SEGMENT_BYTES);
-
-                if (max_safe_segments <= 0) {
-                    segments_per_cycle = 0;
-                } else if (segments_per_cycle > max_safe_segments) {
-                    segments_per_cycle = max_safe_segments;
-                }
-            }
-        }
-
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux", segments_per_cycle);
@@ -351,15 +330,6 @@ void hls_fetch_task(void *pvParameters)
             continue;
         }
 #endif
-
-        if (segments_per_cycle <= 0) {
-            ESP_LOGD(TAG, "Backpressure margin insuffisante - report du cycle (level=%d%%)", level);
-            handle->is_downloading = false;
-            if (!hls_interruptible_delay_ms(300)) {
-                goto task_exit;
-            }
-            continue;
-        }
 
         // Phase 1: Collecter indices des N segments les plus récents non téléchargés
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
