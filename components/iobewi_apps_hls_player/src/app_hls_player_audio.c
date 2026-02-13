@@ -17,6 +17,51 @@
 
 static const char *TAG = "hls_audio";
 
+static esp_err_t hls_write_all_pcm(app_hls_player_t *handle,
+                                   const uint8_t *buf,
+                                   size_t len,
+                                   uint32_t timeout_ms_total,
+                                   size_t *total_written)
+{
+    if (handle == NULL || handle->write_cb == NULL || buf == NULL || total_written == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *total_written = 0;
+    int64_t t0_us = esp_timer_get_time();
+
+    while (*total_written < len) {
+        uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - t0_us) / 1000);
+        if (elapsed_ms >= timeout_ms_total) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        uint32_t remaining_ms = timeout_ms_total - elapsed_ms;
+        size_t written_now = 0;
+        esp_err_t err = handle->write_cb(handle->write_ctx,
+                                         buf + *total_written,
+                                         len - *total_written,
+                                         &written_now,
+                                         remaining_ms);
+
+        *total_written += written_now;
+
+        if (err != ESP_OK) {
+            if (err == ESP_ERR_TIMEOUT && *total_written < len) {
+                return ESP_ERR_TIMEOUT;
+            }
+            return err;
+        }
+
+        if (written_now == 0) {
+            // Évite une boucle chaude si le sink est momentanément saturé.
+            vTaskDelay(1);
+        }
+    }
+
+    return ESP_OK;
+}
+
 void hls_audio_play_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
@@ -96,6 +141,8 @@ void hls_audio_play_task(void *pvParameters)
     int error_count = 0;
     bool download_signaled = false;
     bool was_downloading = false;
+    uint32_t pcm_short_write_count = 0;
+    uint32_t pcm_timeout_count = 0;
 
     // [FIX UNDERRUN] Prébuffer 70-80% avant démarrage (vs 500ms fixe)
     // Donne >400ms marge pour survivre aux refresh M3U8 (389ms)
@@ -169,8 +216,9 @@ void hls_audio_play_task(void *pvParameters)
             size_t rb_used = handle->buffer_size - rb_free;
             float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
 
-            ESP_LOGI(TAG, "[HEARTBEAT] alive, decoded=%.1f f/s, rb=%.0f%% (%zu/%zu KB), leftover=%zu",
-                     decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len);
+            ESP_LOGI(TAG, "[HEARTBEAT] alive, decoded=%.1f f/s, rb=%.0f%% (%zu/%zu KB), leftover=%zu, pcm_short=%lu, pcm_to=%lu",
+                     decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
+                     (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count);
 
             last_heartbeat_us = now_hb;
             last_decode_count = decode_count;
@@ -502,9 +550,11 @@ void hls_audio_play_task(void *pvParameters)
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
                 int64_t t0_wcb = esp_timer_get_time();
 #endif
-                esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
-                                                 silence_size, &bytes_written,
-                                                 pdMS_TO_TICKS(100));
+                esp_err_t err = hls_write_all_pcm(handle,
+                                                  (const uint8_t *)decoded_buffer,
+                                                  silence_size,
+                                                  100,
+                                                  &bytes_written);
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
                 int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
                 // 44.1kHz stereo 16-bit = 176.4 KB/s → expected_us = bytes / 0.1764
@@ -518,6 +568,12 @@ void hls_audio_play_task(void *pvParameters)
 #endif
                 if (err == ESP_OK) {
                     ESP_LOGD(TAG, "[SILENCE] Inserted %zu bytes to mask underrun", bytes_written);
+                } else if (err == ESP_ERR_TIMEOUT) {
+                    pcm_timeout_count++;
+                }
+
+                if (bytes_written < silence_size) {
+                    pcm_short_write_count++;
                 }
 
                 no_data_streak = 0;  // Reset pour éviter spam
@@ -706,9 +762,11 @@ void hls_audio_play_task(void *pvParameters)
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
             int64_t t0_wcb = esp_timer_get_time();
 #endif
-            esp_err_t err = handle->write_cb(handle->write_ctx, decoded_buffer,
-                                             out_frame.decoded_size, &bytes_written,
-                                             pdMS_TO_TICKS(200));
+            esp_err_t err = hls_write_all_pcm(handle,
+                                              (const uint8_t *)decoded_buffer,
+                                              out_frame.decoded_size,
+                                              200,
+                                              &bytes_written);
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
             int64_t dt_wcb = esp_timer_get_time() - t0_wcb;
             // 44.1kHz stereo 16-bit = 176.4 KB/s → expected_us = bytes / 0.1764
@@ -722,6 +780,13 @@ void hls_audio_play_task(void *pvParameters)
 #endif
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Erreur d'écriture audio: %s", esp_err_to_name(err));
+                if (err == ESP_ERR_TIMEOUT) {
+                    pcm_timeout_count++;
+                }
+            }
+
+            if (bytes_written < out_frame.decoded_size) {
+                pcm_short_write_count++;
             }
 
             if (decode_count % 100 == 0) {
