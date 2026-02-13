@@ -446,6 +446,9 @@ void hls_fetch_task(void *pvParameters)
             if (handle->target_duration > 0) {
                 int td_ms = handle->target_duration * 1000;
                 int td_based = td_ms - 800;
+                if (td_based < 500) {
+                    td_based = 500;
+                }
                 if (td_based > warn_ts_ms) {
                     warn_ts_ms = td_based;
                 }
@@ -494,9 +497,17 @@ void hls_fetch_task(void *pvParameters)
                          (long long)last_sequence_number);
             }
 
-            ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
-                     (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
-                     downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+            int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
+            int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
+            if (other_ms < 0) {
+                other_ms = 0;
+            }
+
+            ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
+                     (long long)cycle_ms,
+                     downloaded_segments, advanced_segments, level, segments_per_cycle,
+                     (long long)last_sequence_number,
+                     (long long)ts_sum_ms, (long long)other_ms,
                      (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
             // Hardening live: relancer immédiatement un refresh playlist sans attendre le timer.
@@ -544,9 +555,17 @@ void hls_fetch_task(void *pvParameters)
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
                 }
 
-                ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
-                         (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
-                         downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+                int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
+                int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
+                if (other_ms < 0) {
+                    other_ms = 0;
+                }
+
+                ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
+                         (long long)cycle_ms,
+                         downloaded_segments, advanced_segments, level, segments_per_cycle,
+                         (long long)last_sequence_number,
+                         (long long)ts_sum_ms, (long long)other_ms,
                          (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
@@ -565,9 +584,17 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
 
-        ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (ok=%d advanced=%d ts_sum=%lld ms m3u8=%lld/%lld ms)",
-                 (long long)((esp_timer_get_time() - cycle_start_us) / 1000),
-                 downloaded_segments, advanced_segments, (long long)ts_sum_ms,
+        int64_t cycle_ms = (esp_timer_get_time() - cycle_start_us) / 1000;
+        int64_t other_ms = cycle_ms - master_m3u8_ms - media_m3u8_ms - ts_sum_ms;
+        if (other_ms < 0) {
+            other_ms = 0;
+        }
+
+        ESP_LOGI(TAG, "[TIMING] fetch cycle done: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
+                 (long long)cycle_ms,
+                 downloaded_segments, advanced_segments, level, segments_per_cycle,
+                 (long long)last_sequence_number,
+                 (long long)ts_sum_ms, (long long)other_ms,
                  (long long)master_m3u8_ms, (long long)media_m3u8_ms);
 
         lib_m3u8_parser_free(&playlist);
