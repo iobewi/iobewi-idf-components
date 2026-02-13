@@ -287,7 +287,8 @@ void hls_fetch_task(void *pvParameters)
 
         // FIX #4: Télécharger segments dans l'ordre chronologique
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
-        bool downloaded = false;
+        bool any_downloaded_this_cycle = false;
+        bool hole_detected = false;
 
         // FIX #13: Segments adaptatifs au buffer (évite overflow → drop-old → corruption)
         size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
@@ -338,6 +339,7 @@ void hls_fetch_task(void *pvParameters)
         // Phase 1 (FIX): Collecter segments SEQUENTIELS pour éviter les trous audio
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
         int to_download_count = 0;
+        int64_t wanted_seq = (last_sequence_number >= 0) ? (last_sequence_number + 1) : -1;
 
         if (last_sequence_number < 0) {
             // Cold start: prendre les N derniers disponibles mais dans l'ordre chronologique
@@ -350,8 +352,6 @@ void hls_fetch_task(void *pvParameters)
                 to_download[to_download_count++] = i;
             }
         } else {
-            int64_t wanted_seq = last_sequence_number + 1;
-
             for (int i = 0; i < playlist.segment_count && to_download_count < segments_per_cycle; i++) {
                 if (playlist.segments[i].sequence == wanted_seq) {
                     for (int j = i; j < playlist.segment_count && to_download_count < segments_per_cycle; j++) {
@@ -376,7 +376,8 @@ void hls_fetch_task(void *pvParameters)
             int64_t oldest_in_playlist = playlist.segments[0].sequence;
             int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
             if (oldest_in_playlist <= last_sequence_number + 1) {
-                ESP_LOGI(TAG, "No next segment yet (last=%lld, window=[%lld..%lld]) - wait",
+                ESP_LOGI(TAG, "No next segment yet (wanted=%lld, last=%lld, window=[%lld..%lld]) - wait",
+                         (long long)wanted_seq,
                          (long long)last_sequence_number,
                          (long long)oldest_in_playlist,
                          (long long)newest_in_playlist);
@@ -418,11 +419,15 @@ void hls_fetch_task(void *pvParameters)
                 // N'avancer la séquence que sur continuité stricte (ou cold start)
                 if (last_sequence_number < 0 || seg->sequence == (last_sequence_number + 1)) {
                     last_sequence_number = seg->sequence;
-                    downloaded = true;
+                    any_downloaded_this_cycle = true;
                 } else {
                     ESP_LOGW(TAG, "Trou de séquence: last=%lld, got=%lld (pas d'avance)",
                              (long long)last_sequence_number, (long long)seg->sequence);
-                    downloaded = false;
+                    if (handle->play_task) {
+                        ESP_LOGW(TAG, "Trou de séquence -> notification NOTIF_RESET vers play_task");
+                        xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+                    }
+                    hole_detected = true;
                     break;
                 }
                 ESP_LOGI(TAG, "Segment %lld OK (%d/%d téléchargés)",
@@ -436,7 +441,7 @@ void hls_fetch_task(void *pvParameters)
 
         // FIX #12: Détection décrochage et resynchronisation
         // Si aucun segment téléchargé alors que la playlist en contient, vérifier si on est trop en retard
-        if (!downloaded && playlist.segment_count > 0 && last_sequence_number >= 0) {
+        if (!any_downloaded_this_cycle && playlist.segment_count > 0 && last_sequence_number >= 0) {
             // Vérifier si tous les segments disponibles ont été skippés
             int64_t oldest_in_playlist = playlist.segments[0].sequence;
             int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
@@ -461,7 +466,12 @@ void hls_fetch_task(void *pvParameters)
                 continue;
             }
 
-            ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
+            if (hole_detected) {
+                ESP_LOGW(TAG, "Cycle terminé avec trou de séquence sans décrochage fenêtre (last=%lld)",
+                         (long long)last_sequence_number);
+            } else {
+                ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
+            }
         }
 
         lib_m3u8_parser_free(&playlist);
