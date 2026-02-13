@@ -70,6 +70,13 @@ struct app_hls_player_s {
     uint32_t resync_notif_guard;            /**< Rate-limit NOTIF_RESYNC fallback */
     uint8_t ts_carry[188];                  /**< Carry buffer pour alignement TS 188-byte */
     size_t ts_carry_len;                    /**< Nombre de bytes dans ts_carry */
+    int64_t seg_request_start_us;           /**< DIAG: début requête segment */
+    int64_t seg_connected_us;               /**< DIAG: socket connectée (HTTP_EVENT_ON_CONNECTED) */
+    int64_t seg_first_data_us;              /**< DIAG: first byte reçu */
+    int64_t seg_last_data_us;               /**< DIAG: dernier chunk reçu */
+    uint64_t seg_rb_push_us;                /**< DIAG: temps cumulé push ringbuffer */
+    uint64_t seg_drop_recovery_us;          /**< DIAG: temps cumulé drop-old/recovery */
+    size_t seg_http_body_bytes;             /**< DIAG: bytes reçus côté HTTP body */
 };
 
 /**

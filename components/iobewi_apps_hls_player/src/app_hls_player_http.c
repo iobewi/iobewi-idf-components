@@ -19,6 +19,91 @@ static const char *TAG = "hls_http";
 // Si instabilité réseau/TLS : augmenter à 8KB
 #define HTTP_BUFFER_SIZE (4 * 1024)
 
+static bool hls_send_ts_packet(app_hls_player_t *handle, const uint8_t *packet)
+{
+    int64_t push_start_us = esp_timer_get_time();
+    bool sent_ok = (xRingbufferSend(handle->ring_buffer, packet, 188, 0) == pdTRUE);
+    handle->seg_rb_push_us += (uint64_t)(esp_timer_get_time() - push_start_us);
+
+#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
+    if (!sent_ok) {
+        int64_t drop_start_us = esp_timer_get_time();
+
+        bool dropped = false;
+        int drop_count = 0;
+        for (int attempt = 0; attempt < 20 && !dropped; attempt++) {
+            size_t drop_sz = 0;
+            void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
+            if (!drop) break;
+
+            if (drop_sz != 188) {
+                vRingbufferReturnItem(handle->ring_buffer, drop);
+                handle->drop_old_count++;
+                handle->bad_item_size_count++;
+                drop_count++;
+
+                if ((handle->bad_item_size_count % 50) == 0) {
+                    ESP_LOGW(TAG, "Ring item size=%zu (expected 188) [x%u]",
+                             drop_sz, handle->bad_item_size_count);
+                }
+                hls_rate_limited_resync(handle);
+                continue;
+            }
+
+            uint8_t *ts = (uint8_t *)drop;
+            bool is_pusi = (ts[0] == 0x47 && (ts[1] & 0x40) != 0);
+
+            vRingbufferReturnItem(handle->ring_buffer, drop);
+            handle->drop_old_count++;
+            drop_count++;
+
+            if (is_pusi) {
+                dropped = true;
+
+                if (handle->play_task && (handle->drop_old_count % 50) == 0) {
+                    xTaskNotify(handle->play_task, NOTIF_RESYNC, eSetBits);
+                }
+
+                push_start_us = esp_timer_get_time();
+                sent_ok = (xRingbufferSend(handle->ring_buffer, packet, 188, 0) == pdTRUE);
+                handle->seg_rb_push_us += (uint64_t)(esp_timer_get_time() - push_start_us);
+                if (sent_ok) {
+                    handle->drop_recover_count++;
+                    if ((handle->drop_old_count % 100) == 0) {
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                        size_t rb_used = handle->buffer_size - rb_free;
+                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI] RB: %zu/%zu KB %.0f%%",
+                                 (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
+                                 (rb_used*100.0f)/handle->buffer_size);
+#else
+                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI]", (unsigned)handle->drop_old_count);
+#endif
+                    }
+                }
+            }
+        }
+
+        if (!dropped && drop_count > 0) {
+            hls_rate_limited_resync(handle);
+        }
+
+        handle->seg_drop_recovery_us += (uint64_t)(esp_timer_get_time() - drop_start_us);
+    }
+#endif
+
+    if (sent_ok) {
+        __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
+    } else {
+        handle->drop_count++;
+        if ((handle->drop_count % 100) == 0) {
+            ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
+        }
+    }
+
+    return sent_ok;
+}
+
 /**
  * @brief Helper pour lire header Location de manière sécurisée
  *
@@ -59,8 +144,17 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
     app_hls_player_t *handle = (app_hls_player_t *)evt->user_data;
 
     switch (evt->event_id) {
+        case HTTP_EVENT_ON_CONNECTED:
+            handle->seg_connected_us = esp_timer_get_time();
+            break;
         case HTTP_EVENT_ON_DATA:
             if (evt->data_len > 0 && handle->ring_buffer) {
+                if (handle->seg_first_data_us == 0) {
+                    handle->seg_first_data_us = esp_timer_get_time();
+                }
+                handle->seg_last_data_us = esp_timer_get_time();
+                handle->seg_http_body_bytes += (size_t)evt->data_len;
+
                 // [TS ALIGNMENT] Alignement TS 188-byte sans malloc pour stabilité
                 const uint8_t *src = (const uint8_t *)evt->data;
                 size_t src_len = (size_t)evt->data_len;
@@ -77,81 +171,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 
                     // Si on a un paquet TS complet, l'envoyer
                     if (handle->ts_carry_len == 188) {
-                        bool sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
-#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
-                        if (!sent_ok) {
-                            // Drop jusqu'à trouver une frontière PES (PUSI=1)
-                            bool dropped = false;
-                            int drop_count = 0;
-                            for (int attempt = 0; attempt < 20 && !dropped; attempt++) {
-                                size_t drop_sz = 0;
-                                void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
-                                if (!drop) break;
-
-                                // Défensif: vérifier taille avant d'accéder au contenu
-                                if (drop_sz != 188) {
-                                    vRingbufferReturnItem(handle->ring_buffer, drop);
-                                    handle->drop_old_count++;
-                                    handle->bad_item_size_count++;
-                                    drop_count++;
-
-                                    // Corruption détectée : log rate-limited + forcer resync soft
-                                    if ((handle->bad_item_size_count % 50) == 0) {
-                                        ESP_LOGW(TAG, "Ring item size=%zu (expected 188) [x%u]",
-                                                 drop_sz, handle->bad_item_size_count);
-                                    }
-                                    hls_rate_limited_resync(handle);
-                                    continue;
-                                }
-
-                                uint8_t *ts = (uint8_t *)drop;
-                                bool is_pusi = (ts[0] == 0x47 && (ts[1] & 0x40) != 0);
-
-                                vRingbufferReturnItem(handle->ring_buffer, drop);
-                                handle->drop_old_count++;
-                                drop_count++;
-
-                                if (is_pusi) {
-                                    dropped = true;
-
-                                    if (handle->play_task && (handle->drop_old_count % 50) == 0) {
-                                        xTaskNotify(handle->play_task, NOTIF_RESYNC, eSetBits);
-                                    }
-
-                                    sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
-                                    if (sent_ok) {
-                                        handle->drop_recover_count++;
-                                        if ((handle->drop_old_count % 100) == 0) {
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                                            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                                            size_t rb_used = handle->buffer_size - rb_free;
-                                            ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry] RB: %zu/%zu KB %.0f%%",
-                                                     (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
-                                                     (rb_used*100.0f)/handle->buffer_size);
-#else
-                                            ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry]", (unsigned)handle->drop_old_count);
-#endif
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Fallback: si pas de PUSI trouvé après 20 tentatives, force resync soft (rate-limited)
-                            if (!dropped && drop_count > 0) {
-                                hls_rate_limited_resync(handle);
-                            }
-                        }
-#endif
-                        if (sent_ok) {
-                            // Compteur lock-free: cohérent avec les autres chemins HTTP
-                            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-                        } else {
-                            handle->drop_count++;
-                            if ((handle->drop_count % 100) == 0) {
-                                ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
-                            }
-                        }
-
+                        hls_send_ts_packet(handle, handle->ts_carry);
                         handle->ts_carry_len = 0;
                     }
                 }
@@ -160,84 +180,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 // Avant: bulk aligné (3948 bytes) → drop 21 paquets d'un coup → corruption TS massive
                 // Après: 188 bytes → drop 1 paquet max → corruption minimale
                 while (src_len >= 188) {
-                    bool sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
-#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
-                    if (!sent_ok) {
-                        // Drop jusqu'à trouver une frontière PES (PUSI=1) pour éviter
-                        // de casser une AAC frame fragmentée sur plusieurs TS
-                        bool dropped = false;
-                        int drop_count = 0;
-                        for (int attempt = 0; attempt < 20 && !dropped; attempt++) {
-                            size_t drop_sz = 0;
-                            void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
-                            if (!drop) break;
-
-                            // Défensif: vérifier taille avant d'accéder au contenu
-                            if (drop_sz != 188) {
-                                vRingbufferReturnItem(handle->ring_buffer, drop);
-                                handle->drop_old_count++;
-                                handle->bad_item_size_count++;
-                                drop_count++;
-
-                                // Corruption détectée : log rate-limited + forcer resync soft
-                                if ((handle->bad_item_size_count % 50) == 0) {
-                                    ESP_LOGW(TAG, "Ring item size=%zu (expected 188) [x%u]",
-                                             drop_sz, handle->bad_item_size_count);
-                                }
-                                hls_rate_limited_resync(handle);
-                                continue;
-                            }
-
-                            uint8_t *ts = (uint8_t *)drop;
-                            bool is_pusi = (ts[0] == 0x47 && (ts[1] & 0x40) != 0);
-
-                            // Compter tous les drops (PUSI + non-PUSI)
-                            vRingbufferReturnItem(handle->ring_buffer, drop);
-                            handle->drop_old_count++;
-                            drop_count++;
-
-                            if (is_pusi) {
-                                // Frontière PES trouvée : arrêter
-                                dropped = true;
-
-                                // Soft resync côté play task (rare)
-                                if (handle->play_task && (handle->drop_old_count % 50) == 0) {
-                                    xTaskNotify(handle->play_task, NOTIF_RESYNC, eSetBits);
-                                }
-
-                                sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
-                                if (sent_ok) {
-                                    handle->drop_recover_count++;
-                                    if ((handle->drop_old_count % 100) == 0) {
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                                        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                                        size_t rb_used = handle->buffer_size - rb_free;
-                                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI] RB: %zu/%zu KB %.0f%%",
-                                                 (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
-                                                 (rb_used*100.0f)/handle->buffer_size);
-#else
-                                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI]", (unsigned)handle->drop_old_count);
-#endif
-                                    }
-                                }
-                            }
-                        }
-
-                        // Fallback: si pas de PUSI trouvé après 20 tentatives, force resync soft (rate-limited)
-                        if (!dropped && drop_count > 0) {
-                            hls_rate_limited_resync(handle);
-                        }
-                    }
-#endif
-                    if (sent_ok) {
-                        // Compteur lock-free: évite de bloquer le callback HTTP
-                        __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-                    } else {
-                        handle->drop_count++;
-                        if ((handle->drop_count % 100) == 0) {
-                            ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
-                        }
-                    }
+                    hls_send_ts_packet(handle, src);
 
                     src += 188;
                     src_len -= 188;
@@ -277,7 +220,16 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         return ESP_FAIL;
     }
 
+    handle->seg_request_start_us = esp_timer_get_time();
+    handle->seg_connected_us = 0;
+    handle->seg_first_data_us = 0;
+    handle->seg_last_data_us = 0;
+    handle->seg_rb_push_us = 0;
+    handle->seg_drop_recovery_us = 0;
+    handle->seg_http_body_bytes = 0;
+
     esp_err_t err = esp_http_client_perform(client);
+    int64_t seg_end_us = esp_timer_get_time();
     if (err == ESP_OK) {
         int status = esp_http_client_get_status_code(client);
         int length = esp_http_client_get_content_length(client);
@@ -298,6 +250,33 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
             }
             err = ESP_FAIL;
         }
+
+        int64_t connect_ms = (handle->seg_connected_us > 0)
+            ? ((handle->seg_connected_us - handle->seg_request_start_us) / 1000)
+            : -1;
+        int64_t ttfb_ms = (handle->seg_first_data_us > 0)
+            ? ((handle->seg_first_data_us - handle->seg_request_start_us) / 1000)
+            : -1;
+        int64_t body_ms = (handle->seg_first_data_us > 0 && handle->seg_last_data_us > 0)
+            ? ((handle->seg_last_data_us - handle->seg_first_data_us) / 1000)
+            : 0;
+        int64_t total_ms = (seg_end_us - handle->seg_request_start_us) / 1000;
+        int64_t rb_push_ms = (int64_t)(handle->seg_rb_push_us / 1000);
+        int64_t drop_recovery_ms = (int64_t)(handle->seg_drop_recovery_us / 1000);
+        float body_kBps = (body_ms > 0)
+            ? ((handle->seg_http_body_bytes / 1024.0f) / (body_ms / 1000.0f))
+            : 0.0f;
+
+        ESP_LOGI(TAG,
+                 "[SEG DIAG] total=%lld ms connect=%lld ms ttfb=%lld ms body=%lld ms rb_push=%lld ms drop_recover=%lld ms bytes=%u (%.1f kB/s)",
+                 (long long)total_ms,
+                 (long long)connect_ms,
+                 (long long)ttfb_ms,
+                 (long long)body_ms,
+                 (long long)rb_push_ms,
+                 (long long)drop_recovery_ms,
+                 (unsigned)handle->seg_http_body_bytes,
+                 body_kBps);
     } else {
         ESP_LOGE(TAG, "Erreur HTTP: %s", esp_err_to_name(err));
     }
