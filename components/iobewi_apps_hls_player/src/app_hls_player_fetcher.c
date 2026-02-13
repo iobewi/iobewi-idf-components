@@ -31,6 +31,35 @@ static inline void hls_compute_cycle_other_ms(int64_t cycle_start_us,
     *cycle_ms = c;
     *other_ms = o;
 }
+static void hls_resync_to_live_edge(int level,
+                                    int64_t oldest_in_playlist,
+                                    int64_t newest_in_playlist,
+                                    int64_t *last_sequence_number)
+{
+    int64_t catchup_backoff = 2;
+    if (level > 75) {
+        catchup_backoff = 4;
+    } else if (level > 60) {
+        catchup_backoff = 3;
+    }
+
+    int64_t catchup_seq = newest_in_playlist - catchup_backoff;
+    if (catchup_seq < oldest_in_playlist) {
+        catchup_seq = oldest_in_playlist;
+    }
+
+    int64_t last_before = *last_sequence_number;
+    *last_sequence_number = catchup_seq - 1;
+
+    ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld last_before=%lld last_after=%lld)",
+             (long long)catchup_seq,
+             (long long)oldest_in_playlist,
+             (long long)newest_in_playlist,
+             (long long)catchup_backoff,
+             (long long)last_before,
+             (long long)*last_sequence_number);
+}
+
 
 
 /**
@@ -314,6 +343,7 @@ void hls_fetch_task(void *pvParameters)
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
         bool any_downloaded_this_cycle = false;
         bool hole_detected = false;
+        bool rb_budget_abort_this_cycle = false;
         int downloaded_segments = 0;  // Segments HTTP téléchargés avec succès
         int advanced_segments = 0;    // Segments ayant avancé last_sequence_number
         int64_t ts_sum_ms = 0;        // Somme durées download TS du cycle
@@ -477,7 +507,7 @@ void hls_fetch_task(void *pvParameters)
                 kbps = (uint32_t)(((uint64_t)handle->last_seg_metrics.body_bytes * 8ULL) / (uint64_t)body_ms);
             }
 
-            ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
+            ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d rb_budget=%d",
                      (long long)seg->sequence,
                      handle->last_seg_metrics.reuse ? 1 : 0,
                      (long long)handle->last_seg_metrics.open_ms,
@@ -487,7 +517,8 @@ void hls_fetch_task(void *pvParameters)
                      (unsigned)handle->last_seg_metrics.body_bytes,
                      kbps,
                      (long long)handle->last_seg_metrics.rb_wait_ms,
-                     handle->last_seg_metrics.retried ? 1 : 0);
+                     handle->last_seg_metrics.retried ? 1 : 0,
+                     handle->last_seg_metrics.rb_budget_abort ? 1 : 0);
 
             if (err == ESP_OK) {
                 downloaded_segments++;
@@ -532,9 +563,52 @@ void hls_fetch_task(void *pvParameters)
                          (long long)handle->last_seg_metrics.max_read_block_ms,
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          handle->last_seg_metrics.read_calls);
+
+                if (handle->last_seg_metrics.rb_budget_abort && playlist.segment_count > 0) {
+                    int64_t oldest_in_playlist = playlist.segments[0].sequence;
+                    int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
+                    handle->rb_budget_abort_count++;
+                    ESP_LOGW(TAG, "RB_BUDGET exceeded -> abort segment seq=%lld count=%u rb_wait_ms=%lld budget_ms=%d",
+                             (long long)seg->sequence,
+                             (unsigned)handle->rb_budget_abort_count,
+                             (long long)handle->last_seg_metrics.rb_wait_ms,
+                             CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS);
+
+                    hls_resync_to_live_edge(level, oldest_in_playlist, newest_in_playlist, &last_sequence_number);
+                    if (handle->play_task) {
+                        ESP_LOGW(TAG, "RB_BUDGET abort -> notification NOTIF_RESET vers play_task");
+                        xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+                    }
+                    rb_budget_abort_this_cycle = true;
+                }
+
                 handle->is_downloading = false;
                 break;
             }
+        }
+
+        if (rb_budget_abort_this_cycle) {
+            int64_t cycle_ms = 0;
+            int64_t other_ms = 0;
+            hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
+
+            ESP_LOGI(TAG, "[TIMING] fetch cycle rb_budget_abort: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld aborts=%u)",
+                     (long long)cycle_ms,
+                     downloaded_segments, advanced_segments, level, segments_per_cycle,
+                     (long long)last_sequence_number,
+                     (long long)ts_sum_ms, (long long)other_ms,
+                     (long long)master_m3u8_ms, (long long)media_m3u8_ms,
+                     (unsigned)handle->rb_budget_abort_count);
+
+            // Relancer rapidement près du live edge.
+            lib_m3u8_parser_free(&playlist);
+            playlist_valid = false;
+            handle->is_downloading = false;
+            if (!hls_interruptible_delay_ms(100)) {
+                goto task_exit;
+            }
+            xSemaphoreGive(handle->download_semaphore);
+            continue;
         }
 
         if (hole_detected) {
@@ -580,26 +654,7 @@ void hls_fetch_task(void *pvParameters)
                          (long long)oldest_in_playlist,
                          (long long)newest_in_playlist);
                 // Resync near live edge: backoff adaptatif selon niveau buffer.
-                int64_t catchup_backoff = 2;
-                if (level > 75) {
-                    catchup_backoff = 4;
-                } else if (level > 60) {
-                    catchup_backoff = 3;
-                }
-                int64_t catchup_seq = newest_in_playlist - catchup_backoff;
-                if (catchup_seq < oldest_in_playlist) {
-                    catchup_seq = oldest_in_playlist;
-                }
-                int64_t last_before = last_sequence_number;
-                last_sequence_number = catchup_seq - 1;
-
-                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld last_before=%lld last_after=%lld)",
-                         (long long)catchup_seq,
-                         (long long)oldest_in_playlist,
-                         (long long)newest_in_playlist,
-                         (long long)catchup_backoff,
-                         (long long)last_before,
-                         (long long)last_sequence_number);
+                hls_resync_to_live_edge(level, oldest_in_playlist, newest_in_playlist, &last_sequence_number);
 
                 if (handle->play_task) {
                     xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);

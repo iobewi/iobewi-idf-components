@@ -142,6 +142,16 @@ static esp_err_t rb_send_ts_backpressure_timed(app_hls_player_t *handle,
     return err;
 }
 
+static bool hls_rb_wait_budget_exceeded(int64_t rb_wait_us)
+{
+    if (CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS <= 0) {
+        return false;
+    }
+
+    int64_t budget_us = (int64_t)CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS * 1000;
+    return rb_wait_us >= budget_us;
+}
+
 static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
                                       const uint8_t *src,
                                       size_t src_len,
@@ -427,7 +437,8 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
                 if (network_error) {
                     *network_error = true;
                 }
-                ESP_LOGW(TAG, "EOF précoce segment: got=%u expected=%d", (unsigned)handle->last_seg_metrics.body_bytes, length);
+                ESP_LOGW(TAG, "EOF précoce segment: status=%d got=%u expected=%d url=%s", status,
+                         (unsigned)handle->last_seg_metrics.body_bytes, length, url ? url : "(null)");
                 err = ESP_FAIL;
             } else {
                 err = ESP_OK;
@@ -439,6 +450,15 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         err = hls_process_ts_chunk(handle, buffer, (size_t)read, &rb_wait_us);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
+            break;
+        }
+
+        if (hls_rb_wait_budget_exceeded(rb_wait_us)) {
+            handle->last_seg_metrics.rb_budget_abort = true;
+            ESP_LOGW(TAG, "RB_BUDGET exceeded: rb_wait_ms=%lld budget_ms=%d url=%s",
+                     (long long)(rb_wait_us / 1000), CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS,
+                     url ? url : "(null)");
+            err = ESP_ERR_TIMEOUT;
             break;
         }
     }
@@ -469,6 +489,7 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     if (err != ESP_OK && network_error) {
         ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
         handle->last_seg_metrics.retried = true;
+        handle->last_seg_metrics.reuse = false;
         hls_http_ts_client_cleanup(handle);
 
         client = hls_http_ts_client_get_or_create(handle, url, NULL);

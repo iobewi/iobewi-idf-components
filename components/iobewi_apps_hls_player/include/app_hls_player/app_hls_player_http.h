@@ -37,8 +37,9 @@ extern "C" {
  * @param[in] url    URL complète du segment (HTTP ou HTTPS)
  *
  * @return
- *     - ESP_OK  : Segment téléchargé avec succès (status HTTP 200/206)
- *     - ESP_FAIL : Erreur HTTP, status inattendu, ou échec d'initialisation
+ *     - ESP_OK          : Segment téléchargé avec succès (status HTTP 200/206)
+ *     - ESP_ERR_TIMEOUT : Budget d'attente ringbuffer dépassé (live-first abort)
+ *     - ESP_FAIL        : Erreur HTTP, status inattendu, ou échec d'initialisation
  *
  * @note
  *     - Timeout : 5 secondes

@@ -42,6 +42,9 @@ extern "C" {
 #ifndef CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE
     #define CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE 8
 #endif
+#ifndef CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS
+    #define CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS 1500
+#endif
 
 /**
  * @brief Structure interne du player HLS (définition complète)
@@ -69,6 +72,7 @@ struct app_hls_player_s {
     uint32_t drop_recover_count;            /**< Compteur recoveries après drop-old réussi */
     uint32_t bad_item_size_count;           /**< Compteur corruption ringbuffer (drop_sz != 188) */
     uint32_t resync_notif_guard;            /**< Rate-limit NOTIF_RESYNC fallback */
+    uint32_t rb_budget_abort_count;         /**< Nombre d'abandons segment sur budget RB */
     uint8_t ts_carry[188];                  /**< Carry buffer pour alignement TS 188-byte */
     size_t ts_carry_len;                    /**< Nombre de bytes dans ts_carry */
     esp_http_client_handle_t ts_http_client;/**< Client HTTP persistant pour segments TS */
@@ -87,6 +91,7 @@ struct app_hls_player_s {
         int read_calls;                     /**< Nombre d'appels esp_http_client_read() */
         bool reuse;                         /**< true si handle HTTP TS réutilisé */
         bool retried;                       /**< true si retry reconnect effectué */
+        bool rb_budget_abort;               /**< true si segment abort sur budget RB */
     } last_seg_metrics;                     /**< Instrumentation segment (dernier téléchargement) */
 };
 
