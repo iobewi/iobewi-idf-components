@@ -105,17 +105,21 @@ menu "HLS Player Configuration"
         help
             Ringbuffer occupancy threshold (%) to resume after backpressure pause.
 
-    config APP_HLS_PLAYER_RB_WAIT_BUDGET_MS
-        int "RB wait budget per TS segment (ms, 0=disabled)"
-        default 1500
-        range 0 10000
+
+    config APP_HLS_PLAYER_TS_ADMISSION_HIGH
+        int "TS admission high threshold (%)"
+        default 75
+        range 40 95
         help
-            Maximum cumulative time the fetcher may wait on ringbuffer backpressure
-            during a single TS segment download.
+            Ringbuffer occupancy threshold (%) above which fetcher will not start
+            a new TS segment download.
 
-            If exceeded, the current segment is aborted (live-first strategy) and
-            fetcher can resync near the live edge.
-
-            Set to 0 to disable and keep legacy behavior (wait indefinitely).
+    config APP_HLS_PLAYER_TS_ADMISSION_LOW
+        int "TS admission low threshold (%)"
+        default 55
+        range 20 90
+        help
+            Ringbuffer occupancy threshold (%) below which fetcher resumes TS
+            downloads after an admission block.
 
 endmenu

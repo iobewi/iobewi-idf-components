@@ -183,7 +183,6 @@ esp_err_t app_hls_player_start(app_hls_player_t *handle)
     handle->drop_recover_count = 0;
     handle->bad_item_size_count = 0;
     handle->resync_notif_guard = 0;
-    handle->rb_budget_abort_count = 0;
     handle->ts_carry_len = 0;  // Reset carry pour alignement TS
 
     // Signal initial pour déclencher le premier téléchargement

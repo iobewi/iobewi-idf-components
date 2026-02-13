@@ -113,6 +113,7 @@ void hls_fetch_task(void *pvParameters)
 
     int64_t last_sequence_number = -1;
     int resync_cooldown = 0;  // Cycles en mode prudent après décrochage
+    bool ts_admission_blocked = false;
 
     // Playlist hors boucle pour cleanup centralisé à task_exit
     lib_m3u8_parser_playlist_t playlist;
@@ -343,7 +344,6 @@ void hls_fetch_task(void *pvParameters)
         // FIX CRITIQUE: Le décodeur TS attend les segments dans l'ordre temporel
         bool any_downloaded_this_cycle = false;
         bool hole_detected = false;
-        bool rb_budget_abort_this_cycle = false;
         int downloaded_segments = 0;  // Segments HTTP téléchargés avec succès
         int advanced_segments = 0;    // Segments ayant avancé last_sequence_number
         int64_t ts_sum_ms = 0;        // Somme durées download TS du cycle
@@ -391,19 +391,24 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
         }
 
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-        // Gate backpressure au niveau cycle: éviter un cycle partiel (source de sauts audio)
-        // si le buffer est déjà haut, on reporte tout le cycle plutôt que télécharger 1 segment puis couper.
-        const int BACKPRESSURE_HIGH = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
-        if (level >= BACKPRESSURE_HIGH) {
-            ESP_LOGW(TAG, "[BACKPRESSURE] RB %d%% ≥ %d%% - report cycle complet", level, BACKPRESSURE_HIGH);
+        const int admission_high = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_HIGH;
+        const int admission_low = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW;
+
+        if (ts_admission_blocked && level <= admission_low) {
+            ts_admission_blocked = false;
+            ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", level, admission_high, admission_low);
+        }
+
+        if ((!ts_admission_blocked && level >= admission_high) ||
+            (ts_admission_blocked && level > admission_low)) {
+            ts_admission_blocked = true;
+            ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", level, admission_high, admission_low);
             handle->is_downloading = false;
-            if (!hls_interruptible_delay_ms(500)) {
+            if (!hls_interruptible_delay_ms(100)) {
                 goto task_exit;
             }
             continue;
         }
-#endif
 
         // Phase 1 (FIX): Collecter segments SEQUENTIELS pour éviter les trous audio
         int to_download[8];  // Max 8 segments (largement suffisant pour cold start)
@@ -474,6 +479,29 @@ void hls_fetch_task(void *pvParameters)
             int idx = to_download[k];
             const lib_m3u8_parser_segment_t *seg = &playlist.segments[idx];
 
+            // Admission control au niveau segment: ne jamais démarrer un TS quand RB est haut.
+            while (true) {
+                size_t seg_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t seg_filled = handle->buffer_size - seg_free;
+                int seg_level = (seg_filled * 100) / handle->buffer_size;
+
+                if (ts_admission_blocked && seg_level <= admission_low) {
+                    ts_admission_blocked = false;
+                    ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", seg_level, admission_high, admission_low);
+                }
+
+                if ((!ts_admission_blocked && seg_level >= admission_high) ||
+                    (ts_admission_blocked && seg_level > admission_low)) {
+                    ts_admission_blocked = true;
+                    ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", seg_level, admission_high, admission_low);
+                    if (!hls_interruptible_delay_ms(100)) {
+                        goto task_exit;
+                    }
+                    continue;
+                }
+                break;
+            }
+
             ESP_LOGI(TAG, "Téléchargement segment %lld (%d/%d)%s",
                      (long long)seg->sequence, (k + 1), to_download_count,
                      (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISCONTINUITY]" : "");
@@ -507,7 +535,7 @@ void hls_fetch_task(void *pvParameters)
                 kbps = (uint32_t)(((uint64_t)handle->last_seg_metrics.body_bytes * 8ULL) / (uint64_t)body_ms);
             }
 
-            ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d rb_budget=%d",
+            ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
                      (long long)seg->sequence,
                      handle->last_seg_metrics.reuse ? 1 : 0,
                      (long long)handle->last_seg_metrics.open_ms,
@@ -517,8 +545,7 @@ void hls_fetch_task(void *pvParameters)
                      (unsigned)handle->last_seg_metrics.body_bytes,
                      kbps,
                      (long long)handle->last_seg_metrics.rb_wait_ms,
-                     handle->last_seg_metrics.retried ? 1 : 0,
-                     handle->last_seg_metrics.rb_budget_abort ? 1 : 0);
+                     handle->last_seg_metrics.retried ? 1 : 0);
 
             if (err == ESP_OK) {
                 downloaded_segments++;
@@ -564,51 +591,9 @@ void hls_fetch_task(void *pvParameters)
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          handle->last_seg_metrics.read_calls);
 
-                if (handle->last_seg_metrics.rb_budget_abort && playlist.segment_count > 0) {
-                    int64_t oldest_in_playlist = playlist.segments[0].sequence;
-                    int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
-                    handle->rb_budget_abort_count++;
-                    ESP_LOGW(TAG, "RB_BUDGET exceeded -> abort segment seq=%lld count=%u rb_wait_ms=%lld budget_ms=%d",
-                             (long long)seg->sequence,
-                             (unsigned)handle->rb_budget_abort_count,
-                             (long long)handle->last_seg_metrics.rb_wait_ms,
-                             CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS);
-
-                    hls_resync_to_live_edge(level, oldest_in_playlist, newest_in_playlist, &last_sequence_number);
-                    if (handle->play_task) {
-                        ESP_LOGW(TAG, "RB_BUDGET abort -> notification NOTIF_RESET vers play_task");
-                        xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
-                    }
-                    rb_budget_abort_this_cycle = true;
-                }
-
                 handle->is_downloading = false;
                 break;
             }
-        }
-
-        if (rb_budget_abort_this_cycle) {
-            int64_t cycle_ms = 0;
-            int64_t other_ms = 0;
-            hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
-
-            ESP_LOGI(TAG, "[TIMING] fetch cycle rb_budget_abort: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld aborts=%u)",
-                     (long long)cycle_ms,
-                     downloaded_segments, advanced_segments, level, segments_per_cycle,
-                     (long long)last_sequence_number,
-                     (long long)ts_sum_ms, (long long)other_ms,
-                     (long long)master_m3u8_ms, (long long)media_m3u8_ms,
-                     (unsigned)handle->rb_budget_abort_count);
-
-            // Relancer rapidement près du live edge.
-            lib_m3u8_parser_free(&playlist);
-            playlist_valid = false;
-            handle->is_downloading = false;
-            if (!hls_interruptible_delay_ms(100)) {
-                goto task_exit;
-            }
-            xSemaphoreGive(handle->download_semaphore);
-            continue;
         }
 
         if (hole_detected) {

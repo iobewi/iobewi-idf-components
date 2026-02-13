@@ -38,7 +38,6 @@ extern "C" {
  *
  * @return
  *     - ESP_OK          : Segment téléchargé avec succès (status HTTP 200/206)
- *     - ESP_ERR_TIMEOUT : Budget d'attente ringbuffer dépassé (live-first abort)
  *     - ESP_FAIL        : Erreur HTTP, status inattendu, ou échec d'initialisation
  *
  * @note
