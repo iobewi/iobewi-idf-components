@@ -317,6 +317,11 @@ void hls_fetch_task(void *pvParameters)
             segments_per_cycle = 4;
         }
 
+        // En régime établi, limiter l'agressivité pour éviter de décrocher la fenêtre live.
+        if (last_sequence_number >= 0 && segments_per_cycle > 2) {
+            segments_per_cycle = 2;
+        }
+
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
             ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
@@ -471,11 +476,22 @@ void hls_fetch_task(void *pvParameters)
                          (long long)last_sequence_number,
                          (long long)oldest_in_playlist,
                          (long long)newest_in_playlist);
-                ESP_LOGW(TAG, "→ RESYNC: saut vers début de fenêtre actuelle");
+                // Resync near live edge: rester légèrement derrière newest pour éviter double décrochage.
+                const int64_t CATCHUP_BACKOFF = 2;
+                int64_t catchup_seq = newest_in_playlist - CATCHUP_BACKOFF;
+                if (catchup_seq < oldest_in_playlist) {
+                    catchup_seq = oldest_in_playlist;
+                }
+                last_sequence_number = catchup_seq - 1;
 
-                // Resync : repositionner juste avant le segment le plus ancien disponible
-                // Au prochain cycle, on téléchargera depuis oldest_in_playlist
-                last_sequence_number = oldest_in_playlist - 1;
+                ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld)",
+                         (long long)catchup_seq,
+                         (long long)oldest_in_playlist,
+                         (long long)newest_in_playlist);
+
+                if (handle->play_task) {
+                    xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+                }
 
                 // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
                 lib_m3u8_parser_free(&playlist);
