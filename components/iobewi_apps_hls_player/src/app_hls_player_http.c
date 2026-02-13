@@ -9,6 +9,9 @@
 #include "esp_http_client.h"
 #include "esp_timer.h"
 #include "esp_crt_bundle.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -89,22 +92,31 @@ static bool rb_wait_for_space(app_hls_player_t *handle, int timeout_ms)
 
 static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t *pkt188)
 {
+    if (handle == NULL || handle->ring_buffer == NULL || pkt188 == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
     const int high_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
-
-    if (hls_ringbuf_level_pct(handle) >= high_wm) {
-        if (!rb_wait_for_space(handle, 2000)) {
-            return ESP_ERR_TIMEOUT;
-        }
-    }
 #endif
 
-    if (xRingbufferSend(handle->ring_buffer, pkt188, 188, pdMS_TO_TICKS(200)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
+    while (true) {
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+        if (hls_ringbuf_level_pct(handle) >= high_wm) {
+            if (!rb_wait_for_space(handle, -1)) {
+                return ESP_ERR_TIMEOUT;
+            }
+        }
+#endif
 
-    __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-    return ESP_OK;
+        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, pdMS_TO_TICKS(200)) == pdTRUE) {
+            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
+            return ESP_OK;
+        }
+
+        // Ringbuffer momentanément saturé: céder puis réessayer (no-drop)
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
 }
 
 /**
@@ -133,10 +145,8 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                     if (handle->ts_carry_len == 188) {
                         esp_err_t err = rb_send_ts_backpressure(handle, handle->ts_carry);
                         if (err != ESP_OK) {
-                            handle->drop_count++;
-                            if ((handle->drop_count % 25) == 0) {
-                                ESP_LOGW(TAG, "TS push timeout [carry] (x%u)", (unsigned)handle->drop_count);
-                            }
+                            ESP_LOGE(TAG, "TS push failed [carry]: %s", esp_err_to_name(err));
+                            return err;
                         }
                         handle->ts_carry_len = 0;
                     }
@@ -145,10 +155,8 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 while (src_len >= 188) {
                     esp_err_t err = rb_send_ts_backpressure(handle, src);
                     if (err != ESP_OK) {
-                        handle->drop_count++;
-                        if ((handle->drop_count % 25) == 0) {
-                            ESP_LOGW(TAG, "TS push timeout (x%u)", (unsigned)handle->drop_count);
-                        }
+                        ESP_LOGE(TAG, "TS push failed: %s", esp_err_to_name(err));
+                        return err;
                     }
 
                     src += 188;
