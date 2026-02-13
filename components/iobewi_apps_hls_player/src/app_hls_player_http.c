@@ -143,13 +143,8 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                         }
 #endif
                         if (sent_ok) {
-                            // Try-lock pour éviter blocage HTTP callback
-                            if (handle->stats_mutex && xSemaphoreTake(handle->stats_mutex, 0) == pdTRUE) {
-                                handle->bytes_downloaded += 188;
-                                xSemaphoreGive(handle->stats_mutex);
-                            } else {
-                                handle->bytes_downloaded += 188;
-                            }
+                            // Compteur lock-free: cohérent avec les autres chemins HTTP
+                            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
                         } else {
                             handle->drop_count++;
                             if ((handle->drop_count % 100) == 0) {
