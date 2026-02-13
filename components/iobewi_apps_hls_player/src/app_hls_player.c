@@ -280,14 +280,8 @@ esp_err_t app_hls_player_get_stats(app_hls_player_t *handle, app_hls_player_stat
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Protection concurrent access
-    if (handle->stats_mutex) {
-        xSemaphoreTake(handle->stats_mutex, portMAX_DELAY);
-        stats->bytes_downloaded = handle->bytes_downloaded;
-        xSemaphoreGive(handle->stats_mutex);
-    } else {
-        stats->bytes_downloaded = handle->bytes_downloaded;
-    }
+    // Lecture lock-free cohérente avec les updates atomiques du callback HTTP
+    stats->bytes_downloaded = __atomic_load_n(&handle->bytes_downloaded, __ATOMIC_RELAXED);
 
     stats->is_playing = (handle->fetch_task != NULL) || (handle->play_task != NULL);
 
