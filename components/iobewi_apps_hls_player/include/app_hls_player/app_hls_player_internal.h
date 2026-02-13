@@ -11,6 +11,7 @@
 #define APP_HLS_PLAYER_INTERNAL_H
 
 #include "app_hls_player/app_hls_player.h"
+#include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
@@ -70,6 +71,11 @@ struct app_hls_player_s {
     uint32_t resync_notif_guard;            /**< Rate-limit NOTIF_RESYNC fallback */
     uint8_t ts_carry[188];                  /**< Carry buffer pour alignement TS 188-byte */
     size_t ts_carry_len;                    /**< Nombre de bytes dans ts_carry */
+    esp_http_client_handle_t ts_http_client;/**< Client HTTP persistant pour segments TS */
+    char ts_host[128];                      /**< Host cache du client TS */
+    int ts_port;                            /**< Port cache du client TS */
+    esp_http_client_transport_t ts_transport; /**< Transport cache (HTTP/HTTPS) */
+    bool ts_client_ready;                   /**< Indique si le cache TS est valide */
     struct {
         int64_t total_ms;                   /**< Temps total hls_http_download_segment() */
         int64_t open_ms;                    /**< Temps esp_http_client_open() (connect/TLS) */
@@ -79,6 +85,8 @@ struct app_hls_player_s {
         int64_t max_read_block_ms;          /**< Plus long blocage d'un read() */
         size_t body_bytes;                  /**< Bytes lus sur le corps HTTP */
         int read_calls;                     /**< Nombre d'appels esp_http_client_read() */
+        bool reuse;                         /**< true si handle HTTP TS réutilisé */
+        bool retried;                       /**< true si retry reconnect effectué */
     } last_seg_metrics;                     /**< Instrumentation segment (dernier téléchargement) */
 };
 

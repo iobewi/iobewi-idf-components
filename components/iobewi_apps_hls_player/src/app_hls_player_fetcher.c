@@ -471,6 +471,24 @@ void hls_fetch_task(void *pvParameters)
                 }
             }
 
+            int64_t body_ms = handle->last_seg_metrics.body_read_ms;
+            uint32_t kbps = 0;
+            if (body_ms > 0) {
+                kbps = (uint32_t)(((uint64_t)handle->last_seg_metrics.body_bytes * 8ULL) / (uint64_t)body_ms);
+            }
+
+            ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
+                     (long long)seg->sequence,
+                     handle->last_seg_metrics.reuse ? 1 : 0,
+                     (long long)handle->last_seg_metrics.open_ms,
+                     (long long)handle->last_seg_metrics.headers_ms,
+                     (long long)handle->last_seg_metrics.body_read_ms,
+                     (long long)handle->last_seg_metrics.max_read_block_ms,
+                     (unsigned)handle->last_seg_metrics.body_bytes,
+                     kbps,
+                     (long long)handle->last_seg_metrics.rb_wait_ms,
+                     handle->last_seg_metrics.retried ? 1 : 0);
+
             if (err == ESP_OK) {
                 downloaded_segments++;
 

@@ -49,6 +49,16 @@ extern "C" {
 esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url);
 
 /**
+ * @brief Libère le client HTTP persistant utilisé pour les segments TS
+ *
+ * À appeler à l'arrêt/destroy du player, ou lors d'un recreate explicite.
+ * Safe si aucun client n'est actif.
+ *
+ * @param[in] handle Handle du player
+ */
+void hls_http_ts_client_cleanup(app_hls_player_t *handle);
+
+/**
  * @brief Télécharge une playlist M3U8 et retourne son contenu
  *
  * Cette fonction :

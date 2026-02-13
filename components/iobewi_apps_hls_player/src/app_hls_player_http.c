@@ -187,41 +187,189 @@ static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
     return ESP_OK;
 }
 
-esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
+static bool hls_parse_ts_url(const char *url,
+                             char *host,
+                             size_t host_size,
+                             int *port,
+                             esp_http_client_transport_t *transport)
 {
-    int64_t seg_t0 = esp_timer_get_time();
-    memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
+    if (!url || !host || host_size == 0 || !port || !transport) {
+        return false;
+    }
 
-    ESP_LOGI(TAG, "Téléchargement: %s", url);
+    const char *scheme_end = strstr(url, "://");
+    if (!scheme_end) {
+        return false;
+    }
+
+    size_t scheme_len = (size_t)(scheme_end - url);
+    const bool is_https = (scheme_len == 5) && (strncmp(url, "https", 5) == 0);
+    const bool is_http = (scheme_len == 4) && (strncmp(url, "http", 4) == 0);
+    if (!is_http && !is_https) {
+        return false;
+    }
+
+    const char *authority = scheme_end + 3;
+    const char *path = strpbrk(authority, "/?#");
+    size_t authority_len = path ? (size_t)(path - authority) : strlen(authority);
+    if (authority_len == 0) {
+        return false;
+    }
+
+    const char *host_start = authority;
+    if (*host_start == '[') {
+        const char *close_br = memchr(host_start, ']', authority_len);
+        if (!close_br) {
+            return false;
+        }
+
+        size_t host_len = (size_t)(close_br - host_start + 1);
+        if (host_len >= host_size) {
+            return false;
+        }
+        memcpy(host, host_start, host_len);
+        host[host_len] = '\0';
+
+        const char *port_ptr = close_br + 1;
+        if ((size_t)(port_ptr - authority) < authority_len && *port_ptr == ':') {
+            *port = atoi(port_ptr + 1);
+        } else {
+            *port = is_https ? 443 : 80;
+        }
+    } else {
+        const char *colon = memchr(host_start, ':', authority_len);
+        size_t host_len = colon ? (size_t)(colon - host_start) : authority_len;
+        if (host_len == 0 || host_len >= host_size) {
+            return false;
+        }
+
+        memcpy(host, host_start, host_len);
+        host[host_len] = '\0';
+
+        if (colon) {
+            *port = atoi(colon + 1);
+        } else {
+            *port = is_https ? 443 : 80;
+        }
+    }
+
+    if (*port <= 0) {
+        *port = is_https ? 443 : 80;
+    }
+
+    *transport = is_https ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
+    return true;
+}
+
+void hls_http_ts_client_cleanup(app_hls_player_t *handle)
+{
+    if (!handle) {
+        return;
+    }
+
+    if (handle->ts_http_client) {
+        esp_http_client_close(handle->ts_http_client);
+        esp_http_client_cleanup(handle->ts_http_client);
+        handle->ts_http_client = NULL;
+    }
+
+    handle->ts_client_ready = false;
+    handle->ts_host[0] = '\0';
+    handle->ts_port = 0;
+    handle->ts_transport = HTTP_TRANSPORT_UNKNOWN;
+}
+
+static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_t *handle,
+                                                                  const char *url,
+                                                                  bool *reuse_hit)
+{
+    if (!handle || !url) {
+        return NULL;
+    }
+
+    char parsed_host[sizeof(handle->ts_host)] = {0};
+    int parsed_port = 0;
+    esp_http_client_transport_t parsed_transport = HTTP_TRANSPORT_UNKNOWN;
+    if (!hls_parse_ts_url(url, parsed_host, sizeof(parsed_host), &parsed_port, &parsed_transport)) {
+        ESP_LOGE(TAG, "TS_CLIENT parse_url failed: %s", url);
+        return NULL;
+    }
+
+    bool needs_recreate = false;
+    const char *reason = "none";
+    if (!handle->ts_http_client || !handle->ts_client_ready) {
+        needs_recreate = true;
+        reason = "init";
+    } else if ((handle->ts_port != parsed_port) ||
+               (handle->ts_transport != parsed_transport) ||
+               (strncmp(handle->ts_host, parsed_host, sizeof(handle->ts_host)) != 0)) {
+        needs_recreate = true;
+        reason = "host_change";
+    }
+
+    if (reuse_hit) {
+        *reuse_hit = !needs_recreate;
+    }
+
+    if (!needs_recreate) {
+        return handle->ts_http_client;
+    }
+
+    if (handle->ts_http_client) {
+        ESP_LOGI(TAG, "TS_CLIENT recreate reason=%s old=%s:%d", reason, handle->ts_host, handle->ts_port);
+        hls_http_ts_client_cleanup(handle);
+    }
 
     esp_http_client_config_t config = {
         .url = url,
         .buffer_size = HTTP_BUFFER_SIZE,
-        .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
+        .timeout_ms = 5000,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .disable_auto_redirect = true,  // FIX: Log "non suivie" cohérent
+        .disable_auto_redirect = true,
+        .keep_alive_enable = true,
+        .transport_type = parsed_transport,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        ESP_LOGE(TAG, "Échec d'initialisation du client HTTP");
-        return ESP_FAIL;
+    if (!client) {
+        ESP_LOGE(TAG, "TS_CLIENT recreate reason=init_err url=%s", url);
+        handle->ts_client_ready = false;
+        return NULL;
+    }
+
+    handle->ts_http_client = client;
+    handle->ts_client_ready = true;
+    strlcpy(handle->ts_host, parsed_host, sizeof(handle->ts_host));
+    handle->ts_port = parsed_port;
+    handle->ts_transport = parsed_transport;
+
+    ESP_LOGI(TAG, "TS_CLIENT recreate reason=%s new=%s:%d transport=%d", reason,
+             handle->ts_host, handle->ts_port, (int)handle->ts_transport);
+    return handle->ts_http_client;
+}
+
+static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
+                                                esp_http_client_handle_t client,
+                                                const char *url)
+{
+    esp_err_t err = esp_http_client_set_url(client, url);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "TS_CLIENT set_url failed: %s", esp_err_to_name(err));
+        return err;
     }
 
     int64_t open_t0 = esp_timer_get_time();
-    esp_err_t err = esp_http_client_open(client, 0);
-    handle->last_seg_metrics.open_ms = (esp_timer_get_time() - open_t0) / 1000;
+    err = esp_http_client_open(client, 0);
+    handle->last_seg_metrics.open_ms += (esp_timer_get_time() - open_t0) / 1000;
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Échec d'ouverture HTTP segment: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
+        ESP_LOGW(TAG, "TS_CLIENT open failed: %s", esp_err_to_name(err));
         return err;
     }
 
     int64_t hdr_t0 = esp_timer_get_time();
     int length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
-    handle->last_seg_metrics.headers_ms = (esp_timer_get_time() - hdr_t0) / 1000;
+    handle->last_seg_metrics.headers_ms += (esp_timer_get_time() - hdr_t0) / 1000;
     ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
 
     if (status != 200 && status != 206) {
@@ -235,45 +383,78 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         } else {
             ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
         }
-        err = ESP_FAIL;
-    } else {
-        int64_t body_t0 = esp_timer_get_time();
-        int64_t rb_wait_us = 0;
-        uint8_t buffer[HTTP_BUFFER_SIZE];
-
-        while (true) {
-            int64_t read_t0 = esp_timer_get_time();
-            int read = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
-            int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
-
-            handle->last_seg_metrics.read_calls++;
-            if (read_block_ms > handle->last_seg_metrics.max_read_block_ms) {
-                handle->last_seg_metrics.max_read_block_ms = read_block_ms;
-            }
-
-            if (read < 0) {
-                ESP_LOGE(TAG, "Erreur read segment: %d", read);
-                err = ESP_FAIL;
-                break;
-            }
-            if (read == 0) {
-                break;
-            }
-
-            handle->last_seg_metrics.body_bytes += (size_t)read;
-            err = hls_process_ts_chunk(handle, buffer, (size_t)read, &rb_wait_us);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
-                break;
-            }
-        }
-
-        handle->last_seg_metrics.body_read_ms = (esp_timer_get_time() - body_t0) / 1000;
-        handle->last_seg_metrics.rb_wait_ms = rb_wait_us / 1000;
+        esp_http_client_close(client);
+        return ESP_FAIL;
     }
 
+    int64_t body_t0 = esp_timer_get_time();
+    int64_t rb_wait_us = 0;
+    uint8_t buffer[HTTP_BUFFER_SIZE];
+
+    while (true) {
+        int64_t read_t0 = esp_timer_get_time();
+        int read = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+        int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
+
+        handle->last_seg_metrics.read_calls++;
+        if (read_block_ms > handle->last_seg_metrics.max_read_block_ms) {
+            handle->last_seg_metrics.max_read_block_ms = read_block_ms;
+        }
+
+        if (read < 0) {
+            ESP_LOGW(TAG, "Erreur read segment: %d", read);
+            err = ESP_FAIL;
+            break;
+        }
+        if (read == 0) {
+            err = ESP_OK;
+            break;
+        }
+
+        handle->last_seg_metrics.body_bytes += (size_t)read;
+        err = hls_process_ts_chunk(handle, buffer, (size_t)read, &rb_wait_us);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
+            break;
+        }
+    }
+
+    handle->last_seg_metrics.body_read_ms += (esp_timer_get_time() - body_t0) / 1000;
+    handle->last_seg_metrics.rb_wait_ms += rb_wait_us / 1000;
     esp_http_client_close(client);
-    esp_http_client_cleanup(client);
+    return err;
+}
+
+esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
+{
+    int64_t seg_t0 = esp_timer_get_time();
+    memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
+
+    ESP_LOGI(TAG, "Téléchargement: %s", url);
+
+    bool reuse_hit = false;
+    esp_http_client_handle_t client = hls_http_ts_client_get_or_create(handle, url, &reuse_hit);
+    if (!client) {
+        handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
+        return ESP_FAIL;
+    }
+    handle->last_seg_metrics.reuse = reuse_hit;
+
+    esp_err_t err = hls_http_download_segment_once(handle, client, url);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
+        handle->last_seg_metrics.retried = true;
+        hls_http_ts_client_cleanup(handle);
+
+        client = hls_http_ts_client_get_or_create(handle, url, NULL);
+        if (!client) {
+            handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
+            return err;
+        }
+
+        err = hls_http_download_segment_once(handle, client, url);
+    }
+
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;
 }
