@@ -20,6 +20,31 @@ Ce composant fournit une orchestration complète pour le streaming HLS/M3U8 sur 
 
 ## Architecture
 
+### Organisation modulaire
+
+Le composant est organisé en modules séparés pour améliorer la maintenabilité :
+
+```
+app_hls_player/
+├── include/app_hls_player/
+│   ├── app_hls_player.h              # API publique
+│   ├── app_hls_player_types.h        # Types publics
+│   ├── app_hls_player_internal.h     # Structures internes + helpers
+│   ├── app_hls_player_fetcher.h      # Module téléchargement
+│   ├── app_hls_player_audio.h        # Module décodage audio
+│   ├── app_hls_player_http.h         # Module helpers HTTP
+│   └── app_hls_player_ts_sync.h      # Module resynchronisation TS
+├── src/
+│   ├── app_hls_player.c              # Orchestration (new/start/stop/del)
+│   ├── app_hls_player_fetcher.c      # Task téléchargement
+│   ├── app_hls_player_audio.c        # Task décodage (gather buffer)
+│   ├── app_hls_player_http.c         # Helpers HTTP
+│   └── app_hls_player_ts_sync.c      # Resynchronisation TS smart
+└── test/
+    ├── test_app_hls_player.c         # Tests unitaires API publique
+    └── test_ts_sync.c                # Tests unitaires resync TS
+```
+
 ### Vue d'ensemble
 
 ```
@@ -29,13 +54,20 @@ Ce composant fournit une orchestration complète pour le streaming HLS/M3U8 sur 
 │                                                             │
 │  ┌──────────────┐         Ring Buffer          ┌─────────┐ │
 │  │ hls_fetch    │──────► [Données encodées] ──►│  audio  │ │
-│  │ task         │           (100 KB)            │  play   │ │
-│  │              │                               │  task   │ │
+│  │ task         │        (188 bytes/item)       │  play   │ │
+│  │ (fetcher.c)  │         (256 KB total)        │  task   │ │
+│  │              │                               │ (audio.c)│ │
 │  │ - Download   │         Sémaphore             │         │ │
-│  │   M3U8       │◄──────────────────────────────│ - Déco- │ │
-│  │ - Parse      │   (Signal si buffer < 40%)    │   dage  │ │
-│  │ - Download   │                               │ - write_│ │
-│  │   segments   │                               │   cb()  │ │
+│  │   M3U8       │◄──────────────────────────────│ Gather  │ │
+│  │ - Parse      │   (Signal si buffer < 40%)    │ Buffer  │ │
+│  │ - Download   │                               │  (8 KB) │ │
+│  │   segments   │         Notifications         │         │ │
+│  │ (http.c)     │────► RESET/RESYNC/STOP ──────►│ - Déco- │ │
+│  │              │                               │   dage  │ │
+│  │              │                               │ - Resync│ │
+│  │              │                               │ (ts_sync)│
+│  │              │                               │ - write_│ │
+│  │              │                               │   cb()  │ │
 │  └──────────────┘                               └─────────┘ │
 │         │                                             │     │
 │         └─────────── esp_http_client ─────────────────┘     │
@@ -55,19 +87,29 @@ Ce composant fournit une orchestration complète pour le streaming HLS/M3U8 sur 
 
 ### Tâches concurrentes
 
-1. **hls_fetch_task** (priorité 5, 14 KB stack)
-   - Télécharge la playlist M3U8
+1. **hls_fetch_task** (priorité 4, stack 14 KB, Core 0)
+   - Module : `app_hls_player_fetcher.c`
+   - Télécharge la playlist M3U8 (via `app_hls_player_http.c`)
    - Parse avec `lib_m3u8_parser`
    - Gère master playlists (sélection qualité: midfi > hifi > lofi)
-   - Télécharge 2 segments d'avance
+   - Télécharge les segments en boucle (items de 188 bytes)
    - Évite les doublons via numéro de séquence
+   - Rafraîchit périodiquement (target_duration * 0.8)
+   - Détecte DISCONTINUITY → envoie `NOTIF_RESET`
    - Attend signal du sémaphore (contrôle par niveau buffer)
 
-2. **audio_play_task** (priorité 8, 6 KB stack)
+2. **hls_audio_play_task** (priorité 5, stack 6 KB, Core 1)
+   - Module : `app_hls_player_audio.c`
+   - **Gather buffer** : assemble N paquets TS (188 bytes) → 4-8 KB contiguë
+   - **Leftover** : bytes non consommés persistants entre cycles
    - Décode MPEG-TS + AAC vers PCM 16-bit stéréo
    - Applique réduction volume logicielle (25%)
    - Écrit via `write_cb()` fourni par l'utilisateur
-   - Resynchronisation automatique en cas d'erreur
+   - **Resynchronisation smart** (module `app_hls_player_ts_sync.c`) :
+     - Recherche points de resync valides (PID audio, PUSI, PES)
+     - Triple validation sync bytes TS (0x47 espacés 188 bytes)
+     - Stall mode : resync sur leftover uniquement si consumed==0 répété
+   - Gère notifications : `NOTIF_STOP`, `NOTIF_RESET`, `NOTIF_RESYNC`
    - Signale fetch_task si buffer < 40%
 
 ## API Publique
@@ -246,6 +288,44 @@ void app_main(void)
 }
 ```
 
+## Détails techniques
+
+### Gather Buffer + Leftover
+
+L'architecture audio utilise un **gather buffer** pour améliorer la fiabilité du décodage :
+
+**Problème résolu** : Les items du ring buffer (188 bytes = 1 paquet TS) sont trop petits pour certains décodeurs AAC, causant des `consumed=0` en boucle et des erreurs de décodage massives.
+
+**Solution** :
+1. **Gather buffer** (4-8 KB configurable) : assemble N paquets TS en zone contiguë
+2. **Leftover** : bytes non consommés persistants entre cycles de décodage
+3. **Copy-then-return** : items copiés puis retournés immédiatement au ring buffer
+4. **Resync smart** : appliqué effectivement sur le leftover
+
+**Avantages** :
+- ✅ Décodeur reçoit 4-8 KB contiguë (vs 188 bytes)
+- ✅ Continuité stream (leftover entre cycles)
+- ✅ Libération sélective (seulement items consommés)
+- ✅ Resync efficace (skip appliqué + reset décodeur)
+- ✅ Pas de fuite ring buffer (items retournés immédiatement)
+
+**Configuration** : `CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE` (4-16 KB, défaut 8 KB)
+
+### Resynchronisation TS Smart
+
+Module `app_hls_player_ts_sync.c` fournit une resynchronisation intelligente :
+
+**Stratégie multi-niveaux** :
+1. **Validation sync bytes** : triple check 0x47 espacés 188 bytes (élimine faux positifs)
+2. **PID + PUSI** : recherche points de resync valides (début de PES audio)
+3. **Stall mode** : si `consumed==0` répété, resync sur leftover uniquement (pas de recopie)
+4. **Drop aggressif** : 30-50 items max sur NOTIF_RESET (vs tout vider)
+
+**Gardes défensives** :
+- Leftover overflow (`> GATHER_BUF_SIZE`) → flush
+- Rate-limiting notifications (`NOTIF_RESYNC` % 10)
+- Validation alignement TS avant décodage
+
 ## Fonctionnalités
 
 ### Supporté
@@ -261,22 +341,38 @@ void app_main(void)
 
 ### Limitations
 - ❌ Vidéo non supportée (audio uniquement)
-- ❌ Codec MP3 non supporté (AAC uniquement)
+- ❌ Codec MP3 non supporté (AAC uniquement, MPEG-TS container)
 - ❌ Chiffrement AES-128 non supporté
-- ❌ Master playlists: première variante valide uniquement
-- ❌ Pas de support ABR (Adaptive Bitrate)
+- ❌ Master playlists: sélection variant par nom (midfi/hifi/lofi) ou bandwidth
+- ❌ Pas de support ABR (Adaptive Bitrate) dynamique
 - ❌ Segments limités à 32 par playlist (limite lib_m3u8_parser)
+- ⚠️ Ring buffer : items doivent être 188 bytes (NOSPLIT garanti par téléchargement)
+- ⚠️ Gather buffer : latence additionnelle ~20-50 ms (négligeable)
+- ⚠️ Resync smart : peut skip jusqu'à 8 KB si corruption massive (< 1s audio)
 
 ## Configuration
 
 ### Tailles de buffer recommandées
 
+**Ring Buffer** (`CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE`) :
+
 | Scénario | buffer_size | Latence | Robustesse |
 |----------|-------------|---------|------------|
-| WiFi stable | 50 KB | ~3s | Moyenne |
-| WiFi normal | **100 KB** | ~6s | **Recommandé** |
-| WiFi instable | 150 KB | ~9s | Haute |
-| Réseau mobile | 200 KB | ~12s | Très haute |
+| WiFi stable | 128 KB | ~6s | Moyenne |
+| WiFi normal | **256 KB** | ~12s | **Recommandé** |
+| WiFi instable | 512 KB | ~24s | Haute |
+| Réseau mobile | 1024 KB | ~48s | Très haute |
+
+**Gather Buffer** (`CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE`) :
+
+| Scénario | gather_size | RAM | Fiabilité décodage |
+|----------|-------------|-----|-------------------|
+| Minimum | 4 KB | Économie | Acceptable |
+| **Standard** | **8 KB** | **Standard** | **Recommandé** |
+| Robuste | 12 KB | +4 KB | Maximale |
+| Maximum | 16 KB | +8 KB | Overkill |
+
+Note : Gather buffer < 4 KB non recommandé (risque `consumed=0` en boucle)
 
 ### Tailles de stack des tâches
 
@@ -290,26 +386,55 @@ void app_main(void)
 
 ### Mémoire totale requise
 
-- Handle : ~60 bytes
-- Ring buffer : `buffer_size` (100 KB par défaut)
+- Handle : ~256 bytes (structure complète)
+- Ring buffer : `buffer_size` (256 KB recommandé, configurable)
+- Gather buffer : `CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE` (8 KB par défaut)
+- TS carry buffer : 188 bytes (alignement paquets TS)
 - Stacks tâches : 14 KB + 6 KB = 20 KB
-- Buffers décodage : 144 KB + 16 KB = 160 KB
-- **Total : ~280 KB** (avec buffer 100 KB)
+- Buffers décodage : 16 KB (CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE)
+- **Total : ~300 KB** (avec ring buffer 256 KB, gather 8 KB)
 
-Note : Les buffers de décodage sont alloués dynamiquement au démarrage.
+**Configuration Kconfig** :
+```
+CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE=256     # KB, défaut 128
+CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE=8     # KB, défaut 8
+CONFIG_APP_HLS_PLAYER_DEC_BUFFER_SIZE=16       # KB, défaut 16
+```
+
+Note : Tous les buffers sont alloués dynamiquement au démarrage.
 
 ## Resynchronisation
 
-Le player gère automatiquement les erreurs de décodage :
+Le player gère automatiquement les erreurs de décodage via le module `app_hls_player_ts_sync.c` :
 
-1. **Recherche sync word AAC** : `0xFFF` (12 bits)
-2. **Recherche sync word TS** : `0x47` (2 paquets consécutifs)
-3. **Purge agressive** : 2 KB si aucun sync trouvé
+### Fonction `hls_ts_find_next_sync()`
 
-Stratégie équilibrée entre :
-- Récupération rapide après erreur
-- Minimisation pertes audio
-- Évitement watchdog timer
+Recherche robuste du prochain sync byte TS :
+1. **Sync byte** : `0x47` (début paquet TS)
+2. **Triple validation** : si ≥ 564 bytes disponibles, vérifie 3 sync bytes espacés 188 bytes
+3. **Élimination faux positifs** : 0x47 peut apparaître dans payload AAC
+
+### Fonction `hls_ts_resync_smart()`
+
+Resynchronisation intelligente multi-critères :
+1. **Audio PID** : extrait PID depuis paquet TS
+2. **PUSI flag** : vérifie Payload Unit Start Indicator (début PES)
+3. **PES header** : valide 0x000001 (start code PES)
+4. **Points valides** : accepte uniquement PID audio + PUSI=1 + PES valide
+
+### Stratégie notifications
+
+- **NOTIF_RESET** : DISCONTINUITY détecté → flush leftover + reset décodeur
+- **NOTIF_RESYNC** : drop-old ring buffer → resync soft (pas de reset décodeur)
+- **Rate-limiting** : `NOTIF_RESYNC` envoyé tous les 10 événements uniquement
+
+### Équilibre
+
+Stratégie optimisée pour :
+- ✅ Récupération rapide après erreur
+- ✅ Minimisation pertes audio (skip sélectif vs flush total)
+- ✅ Évitement watchdog timer (pas de boucles infinies)
+- ✅ Réduction faux positifs (validation multi-critères)
 
 ## Dépendances
 
@@ -357,22 +482,44 @@ Lors de la détection d'une master playlist, le player :
 
 ### Contrôle du téléchargement
 
-Le système utilise un **sémaphore binaire** pour synchroniser fetch et play :
+Le système utilise **sémaphores et notifications** pour synchroniser fetch et play :
+
+**Sémaphore download** :
 - `audio_play_task` surveille le niveau du buffer
-- Si buffer < 40% : signal via `xSemaphoreGive()`
-- `hls_fetch_task` télécharge 2 segments d'avance
+- Si buffer < 40% : signal via `xSemaphoreGive(download_semaphore)`
+- `hls_fetch_task` télécharge segments en boucle
 - Hysteresis : réinitialisation du signal si buffer > 60%
 
+**Notifications task** (via `xTaskNotify`) :
+- **NOTIF_STOP** : arrêt immédiat demandé (stop interruptible)
+- **NOTIF_RESET** : DISCONTINUITY détecté → flush leftover + reset décodeur
+- **NOTIF_RESYNC** : drop-old ring buffer → resync soft (rate-limited % 10)
+
 Avantages :
-- Évite polling CPU-intensif
-- Télécharge uniquement quand nécessaire
-- Économise bande passante
-- Prévient buffer underrun
+- ✅ Évite polling CPU-intensif
+- ✅ Télécharge uniquement quand nécessaire
+- ✅ Économise bande passante
+- ✅ Prévient buffer underrun
+- ✅ Arrêt rapide (< 100 ms via notifications)
+- ✅ Thread-safety stricte SMP (pas de volatile flags)
 
 ### Thread-safety
-- ❌ Les fonctions ne sont pas thread-safe
-- ✅ Les tâches internes sont synchronisées (sémaphore + ring buffer thread-safe)
-- L'utilisateur doit gérer la synchronisation pour les appels API externes
+
+**API publique** :
+- ❌ Les fonctions ne sont PAS thread-safe (appeler depuis un seul thread)
+- L'utilisateur doit gérer la synchronisation pour appels externes
+
+**Synchronisation interne** :
+- ✅ Ring buffer : thread-safe (FreeRTOS ringbuf)
+- ✅ Statistiques : protégées par mutex (`stats_mutex`)
+- ✅ Sémaphores : `download_semaphore`, `fetch_done`, `play_done`
+- ✅ Notifications task : **remplacent volatile flags** (thread-safety stricte SMP)
+  - `NOTIF_STOP`, `NOTIF_RESET`, `NOTIF_RESYNC` via `xTaskNotify()`
+  - Évite data races sur ESP32-S3 dual-core
+
+**Pinning CPU** :
+- `hls_fetch_task` : Core 0 (téléchargement + parsing)
+- `hls_audio_play_task` : Core 1 (décodage, réduit jitter audio)
 
 ## Performance
 
@@ -395,37 +542,85 @@ Avantages :
 ## Troubleshooting
 
 ### Erreur "Échec de création du décodeur TS"
-→ Vérifier que `esp_aac_dec_register()` et `esp_ts_dec_register()` sont appelés
+→ Vérifier que `esp_aac_dec_register()` et `esp_ts_dec_register()` sont appelés AVANT `app_hls_player_new()`
 
 ### Erreur "Ring buffer plein, données perdues"
-→ Augmenter `buffer_size` ou vérifier que le callback audio ne bloque pas
+→ Augmenter `CONFIG_APP_HLS_PLAYER_RING_BUFFER_SIZE` ou vérifier que le callback audio ne bloque pas
 
 ### Coupures audio fréquentes
 → Augmenter `buffer_size` ou vérifier la stabilité WiFi
+→ Vérifier logs "consumed=0" répétés : peut indiquer problème décodeur
+
+### Erreurs AAC élevées (> 5/minute)
+→ Vérifier qualité réseau (paquets corrompus)
+→ Augmenter `CONFIG_APP_HLS_PLAYER_GATHER_BUFFER_SIZE` (8 → 12 KB)
+→ Vérifier logs resync : fréquence excessive peut indiquer stream corrompu
 
 ### Stack overflow dans hls_fetch_task
-→ NE PAS réduire la taille de stack (14 KB minimum requis)
+→ NE PAS réduire la taille de stack (14 KB minimum requis pour HTTP + parsing M3U8)
 
 ### Audio distordu
-→ Vérifier la configuration I2S du driver (sample_rate, bits_per_sample)
+→ Vérifier la configuration I2S du driver (sample_rate=48000, bits_per_sample=16)
+→ Vérifier que `write_cb()` ne modifie pas les données PCM
+
+### "Leftover overflow" dans les logs
+→ Problème rare : leftover dépasse gather buffer (corruption stream)
+→ Le player flush automatiquement (perte < 1 seconde audio)
+→ Si fréquent : vérifier qualité réseau ou augmenter GATHER_BUFFER_SIZE
+
+### Latence audio excessive (> 10 secondes)
+→ Réduire `RING_BUFFER_SIZE` (256 → 128 KB)
+→ Note : risque underrun si WiFi instable
 
 ## Tests
 
-Tests unitaires disponibles dans `test/test_app_hls_player.c` :
+### Tests unitaires
+
+**`test/test_app_hls_player.c`** : API publique
 - ✅ Validation arguments NULL (toutes fonctions)
 - ✅ Initialisation configuration par défaut
 - ✅ Lifecycle complet (new → del)
 - ✅ Idempotence stop()
 - ✅ Statistiques initiales
 
-Tests d'intégration (manuels) :
-- Streaming radio France Inter (MIDFI)
-- Streaming 30+ minutes
-- Stabilité mémoire (heap minimum)
+**`test/test_ts_sync.c`** : Module resynchronisation TS
+- ✅ `hls_ts_find_next_sync()` : détection sync byte
+- ✅ `hls_ts_resync_smart()` : validation PID + PUSI + PES
+- ✅ Robustesse faux positifs (0x47 dans payload)
+- ✅ Triple validation sync bytes espacés 188 bytes
+
+### Tests d'intégration (manuels)
+
+- ✅ Streaming radio France Inter (MIDFI, AAC 128 kbps)
+- ✅ Streaming 30+ minutes sans coupure
+- ✅ Stabilité mémoire (heap minimum ~1.9 MB)
+- ✅ Gather buffer : < 1% activations stitch
+- ✅ Erreurs AAC : < 1/minute (vs 10+/min sans gather buffer)
+- ✅ Frames PCM : 4500+/minute
+- ✅ Resync smart : activations ≥ 15% (points valides uniquement)
 
 ## Exemples
 
 - `examples/iobewi_driver_max98357a/hls_stream_app` : Exemple complet de streaming HLS avec MAX98357A
+
+## Documentation technique
+
+Documentations détaillées disponibles dans `docs/` :
+
+- **`TODO_RAM_OPTIMIZATION.md`** : Historique complet des optimisations RAM
+  - Architecture gather buffer + leftover
+  - Stratégie resync smart (PID + PUSI + PES)
+  - Bugs corrigés (double memmove, fuite ringbuffer, etc.)
+  - Tests et métriques de performance
+
+- **`P0.1_STACK_REDUCTION.md`** : Réduction stacks des tâches (TODO)
+  - Analyse utilisation stack actuelle
+  - Stratégies de réduction sécurisées
+
+- **`SYNTHESE_ERREUR_AAC.md`** : Diagnostic erreurs AAC
+  - Root cause analysis (items 188 bytes trop petits)
+  - Solutions implémentées (gather buffer)
+  - Métriques avant/après
 
 ## Voir aussi
 
