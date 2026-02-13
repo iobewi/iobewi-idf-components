@@ -8,7 +8,7 @@
  *
  * Caractéristiques :
  * - Alignement automatique TS 188-byte avec carry buffer
- * - Stratégie drop-old sur ringbuffer plein (live-ness)
+ * - Backpressure ringbuffer (blocage producteur sans perte TS)
  * - Support HTTPS avec certificats bundle
  * - Gestion redirections HTTP (détection, pas de suivi auto)
  * - Realloc progressif pour M3U8 (16-64 KB)
@@ -31,7 +31,7 @@ extern "C" {
  * - Télécharge le segment depuis l'URL fournie
  * - Aligne automatiquement les données sur 188-byte (MPEG-TS)
  * - Envoie les paquets TS dans le ring buffer du player
- * - Applique la stratégie drop-old si le buffer est plein (CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL)
+ * - Applique la backpressure quand le buffer est haut (CONFIG_APP_HLS_PLAYER_BACKPRESSURE)
  *
  * @param[in] handle Handle du player (accès au ring buffer et stats)
  * @param[in] url    URL complète du segment (HTTP ou HTTPS)

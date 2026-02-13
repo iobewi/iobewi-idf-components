@@ -296,8 +296,12 @@ void hls_fetch_task(void *pvParameters)
 
         int segments_per_cycle;
         if (last_sequence_number < 0) {
-            // Cold start: buffer initial
-            segments_per_cycle = 4;
+            // Cold start: limite dynamique pour éviter overflow ringbuffer pendant le 1er cycle
+            const int avg_segment_size = 130 * 1024;
+            int max_initial = (int)((handle->buffer_size * 80u / 100u) / avg_segment_size);
+            if (max_initial < 1) max_initial = 1;
+            if (max_initial > 2) max_initial = 2;
+            segments_per_cycle = max_initial;
         } else if (level > 70) {
             // Buffer presque plein → ralentir
             segments_per_cycle = 1;
@@ -314,7 +318,7 @@ void hls_fetch_task(void *pvParameters)
 
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
-            ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux", segments_per_cycle);
+            ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
         }
 
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
