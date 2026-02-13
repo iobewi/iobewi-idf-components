@@ -512,7 +512,9 @@ void hls_fetch_task(void *pvParameters)
                 lib_m3u8_parser_free(&playlist);
                 playlist_valid = false;
                 handle->is_downloading = false;
-                hls_interruptible_delay_ms(100);
+                if (!hls_interruptible_delay_ms(100)) {
+                    goto task_exit;
+                }
                 xSemaphoreGive(handle->download_semaphore);  // Trigger immédiat
                 continue;
             }
