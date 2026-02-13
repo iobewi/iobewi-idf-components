@@ -74,6 +74,10 @@ static bool rb_wait_for_space(app_hls_player_t *handle, int timeout_ms)
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
     int64_t t0_us = esp_timer_get_time();
     while (true) {
+        if (!handle->is_downloading) {
+            return false;
+        }
+
         if (hls_ringbuf_level_pct(handle) <= low_wm) {
             return true;
         }
@@ -101,15 +105,19 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
 #endif
 
     while (true) {
+        if (!handle->is_downloading) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
         if (hls_ringbuf_level_pct(handle) >= high_wm) {
             if (!rb_wait_for_space(handle, -1)) {
-                return ESP_ERR_TIMEOUT;
+                return ESP_ERR_INVALID_STATE;
             }
         }
 #endif
 
-        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, pdMS_TO_TICKS(20)) == pdTRUE) {
             __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
             return ESP_OK;
         }
@@ -145,22 +153,28 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                     if (handle->ts_carry_len == 188) {
                         esp_err_t err = rb_send_ts_backpressure(handle, handle->ts_carry);
                         if (err != ESP_OK) {
-                            ESP_LOGE(TAG, "TS push failed [carry]: %s", esp_err_to_name(err));
-                            return err;
+                            ESP_LOGW(TAG, "TS push stopped [carry]: %s", esp_err_to_name(err));
+                            break;
                         }
                         handle->ts_carry_len = 0;
                     }
                 }
 
+                bool abort_chunk = false;
                 while (src_len >= 188) {
                     esp_err_t err = rb_send_ts_backpressure(handle, src);
                     if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "TS push failed: %s", esp_err_to_name(err));
-                        return err;
+                        ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
+                        abort_chunk = true;
+                        break;
                     }
 
                     src += 188;
                     src_len -= 188;
+                }
+
+                if (abort_chunk) {
+                    break;
                 }
 
                 if (src_len > 0) {
