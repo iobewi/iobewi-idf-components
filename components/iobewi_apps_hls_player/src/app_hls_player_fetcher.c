@@ -276,6 +276,12 @@ void hls_fetch_task(void *pvParameters)
 
             playlist_valid = true;  // Parse media réussi
             free(m3u8_content);
+
+            // Mettre à jour target_duration aussi pour media playlist issue d'une master
+            if (playlist.target_duration > 0) {
+                handle->target_duration = playlist.target_duration;
+            }
+
             lib_m3u8_parser_dump(&playlist);
         }
 
