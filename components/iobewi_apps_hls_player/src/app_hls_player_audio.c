@@ -129,7 +129,8 @@ void hls_audio_play_task(void *pvParameters)
 
     int zero_consume_streak = 0;
     int resync_count = 0;
-    int no_data_streak = 0;  // [DIAG LAG] Compteur underrun
+    int no_data_streak = 0;  // streak underrun (cycles consécutifs)
+    uint32_t underrun_count = 0;
 
     // [FIX AAC error:30] Protection post-resync : évite re-resync immédiat / faux positifs
     // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
@@ -205,25 +206,32 @@ void hls_audio_play_task(void *pvParameters)
         }
 #endif
 
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-        // [DIAG] Heartbeat audio loop : alive + decode rate + ringbuffer occupancy
         int64_t now_hb = esp_timer_get_time();
-        if (now_hb - last_heartbeat_us > 2 * 1000 * 1000) {  // Every 2s
+        if (now_hb - last_heartbeat_us > (int64_t)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS * 1000) {
             int frames_decoded = decode_count - last_decode_count;
-            float decode_rate = frames_decoded / 2.0f;  // frames/sec
+            float decode_rate = frames_decoded / ((float)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS / 1000.0f);
 
-            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-            size_t rb_used = handle->buffer_size - rb_free;
-            float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
-
-            ESP_LOGI(TAG, "[HEARTBEAT] alive, decoded=%.1f f/s, rb=%.0f%% (%zu/%zu KB), leftover=%zu, pcm_short=%lu, pcm_to=%lu",
-                     decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
-                     (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count);
+            if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
+                hls_log_throttle_time("audio_summary", CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS)) {
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t rb_used = handle->buffer_size - rb_free;
+                float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
+                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%.0f%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
+                         decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
+                         (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count,
+                         (unsigned long)underrun_count, no_data_streak);
+#else
+                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
+                         decode_rate, leftover_len,
+                         (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count,
+                         (unsigned long)underrun_count, no_data_streak);
+#endif
+            }
 
             last_heartbeat_us = now_hb;
             last_decode_count = decode_count;
         }
-#endif
 
         // === 1) Gestion notifications STOP/RESET/RESYNC ===
         uint32_t notif = 0;
@@ -538,6 +546,7 @@ void hls_audio_play_task(void *pvParameters)
 
             // Log UNDERRUN seulement si ça dure (>= 10 cycles = ~200-400ms)
             if (no_data_streak >= 10) {
+                underrun_count++;
                 ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, items=%d, fails=%d, stall=%d",
                          gather_len, min_gather, buffer_level, items_copied, receive_fails, stall);
 
@@ -561,7 +570,9 @@ void hls_audio_play_task(void *pvParameters)
                 int64_t expected_us = (silence_size * 1000000LL) / 176400;
                 int64_t threshold_us = expected_us * 3 / 2;  // 1.5x expected (ou min 30ms)
                 if (threshold_us < 30000) threshold_us = 30000;
-                if (dt_wcb > threshold_us) {
+                if (dt_wcb > threshold_us &&
+                    hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+                    hls_log_throttle_time("audio_write_slow_silence", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                     ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (silence %zu bytes, expected ~%lld us)",
                              dt_wcb, bytes_written, expected_us);
                 }
@@ -607,7 +618,9 @@ void hls_audio_play_task(void *pvParameters)
 
         dec_ret = esp_audio_simple_dec_process(dec_handle, &raw, &out_frame);
 
-        if (decode_count++ < 20 || dec_ret != ESP_AUDIO_ERR_OK) {
+        if ((decode_count++ < 20 || dec_ret != ESP_AUDIO_ERR_OK) &&
+            hls_log_mode_at_least(HLS_LOG_MODE_DIAG_HEAVY) &&
+            hls_log_throttle_every_n("decode_detail", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
             ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu",
                      decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size);
         }
@@ -773,7 +786,9 @@ void hls_audio_play_task(void *pvParameters)
             int64_t expected_us = (out_frame.decoded_size * 1000000LL) / 176400;
             int64_t threshold_us = expected_us * 3 / 2;  // 1.5x expected (ou min 30ms)
             if (threshold_us < 30000) threshold_us = 30000;
-            if (dt_wcb > threshold_us) {
+            if (dt_wcb > threshold_us &&
+                hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+                hls_log_throttle_time("audio_write_slow_pcm", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (PCM %zu bytes, expected ~%lld us)",
                          dt_wcb, bytes_written, expected_us);
             }
@@ -789,7 +804,9 @@ void hls_audio_play_task(void *pvParameters)
                 pcm_short_write_count++;
             }
 
-            if (decode_count % 100 == 0) {
+            if ((decode_count % 100 == 0) &&
+                hls_log_mode_at_least(HLS_LOG_MODE_DIAG_HEAVY) &&
+                hls_log_throttle_every_n("audio_pcm_detail", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
                 ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, gather=%zu bytes, leftover=%zu)",
                          bytes_written, decode_count, gather_len, leftover_len);
             }
