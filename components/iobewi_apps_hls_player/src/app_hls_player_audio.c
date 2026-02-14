@@ -207,16 +207,16 @@ void hls_audio_play_task(void *pvParameters)
 
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
         int64_t now_hb = esp_timer_get_time();
-        if (now_hb - last_heartbeat_us > (int64_t)CONFIG_HLS_LOG_SUMMARY_PERIOD_MS * 1000) {
+        if (now_hb - last_heartbeat_us > (int64_t)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS * 1000) {
             int frames_decoded = decode_count - last_decode_count;
-            float decode_rate = frames_decoded / ((float)CONFIG_HLS_LOG_SUMMARY_PERIOD_MS / 1000.0f);
+            float decode_rate = frames_decoded / ((float)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS / 1000.0f);
 
             size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
             size_t rb_used = handle->buffer_size - rb_free;
             float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
 
             if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
-                hls_log_throttle_time("audio_summary", CONFIG_HLS_LOG_SUMMARY_PERIOD_MS)) {
+                hls_log_throttle_time("audio_summary", CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS)) {
                 ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%.0f%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun=%d",
                          decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
                          (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count, no_data_streak);
@@ -565,7 +565,7 @@ void hls_audio_play_task(void *pvParameters)
                 if (threshold_us < 30000) threshold_us = 30000;
                 if (dt_wcb > threshold_us &&
                     hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                    hls_log_throttle_time("audio_write_slow_silence", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                    hls_log_throttle_time("audio_write_slow_silence", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                     ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (silence %zu bytes, expected ~%lld us)",
                              dt_wcb, bytes_written, expected_us);
                 }
@@ -613,7 +613,7 @@ void hls_audio_play_task(void *pvParameters)
 
         if ((decode_count++ < 20 || dec_ret != ESP_AUDIO_ERR_OK) &&
             hls_log_mode_at_least(HLS_LOG_MODE_DIAG_HEAVY) &&
-            hls_log_throttle_every_n("decode_detail", CONFIG_HLS_LOG_SAMPLE_N_FAST)) {
+            hls_log_throttle_every_n("decode_detail", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
             ESP_LOGI(TAG, "Décodage #%d: ret=%d, in=%zu, consumed=%lu, out=%lu",
                      decode_count, dec_ret, decode_len, raw.consumed, out_frame.decoded_size);
         }
@@ -781,7 +781,7 @@ void hls_audio_play_task(void *pvParameters)
             if (threshold_us < 30000) threshold_us = 30000;
             if (dt_wcb > threshold_us &&
                 hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                hls_log_throttle_time("audio_write_slow_pcm", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                hls_log_throttle_time("audio_write_slow_pcm", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGW(TAG, "[DIAG] write_cb slow: %lld us (PCM %zu bytes, expected ~%lld us)",
                          dt_wcb, bytes_written, expected_us);
             }
@@ -799,7 +799,7 @@ void hls_audio_play_task(void *pvParameters)
 
             if ((decode_count % 100 == 0) &&
                 hls_log_mode_at_least(HLS_LOG_MODE_DIAG_HEAVY) &&
-                hls_log_throttle_every_n("audio_pcm_detail", CONFIG_HLS_LOG_SAMPLE_N_FAST)) {
+                hls_log_throttle_every_n("audio_pcm_detail", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
                 ESP_LOGI(TAG, "Audio: %zu bytes PCM (#%d, gather=%zu bytes, leftover=%zu)",
                          bytes_written, decode_count, gather_len, leftover_len);
             }

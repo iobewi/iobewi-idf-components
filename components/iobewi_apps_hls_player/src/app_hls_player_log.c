@@ -5,14 +5,14 @@
 #include "freertos/portmacro.h"
 #include <string.h>
 
-#ifndef CONFIG_HLS_LOG_THROTTLE_MS
-#define CONFIG_HLS_LOG_THROTTLE_MS 5000
+#ifndef CONFIG_APP_HLS_LOG_THROTTLE_MS
+#define CONFIG_APP_HLS_LOG_THROTTLE_MS 5000
 #endif
-#ifndef CONFIG_HLS_LOG_BURST_COUNT
-#define CONFIG_HLS_LOG_BURST_COUNT 3
+#ifndef CONFIG_APP_HLS_LOG_BURST_COUNT
+#define CONFIG_APP_HLS_LOG_BURST_COUNT 3
 #endif
-#ifndef CONFIG_HLS_LOG_BURST_WINDOW_MS
-#define CONFIG_HLS_LOG_BURST_WINDOW_MS 10000
+#ifndef CONFIG_APP_HLS_LOG_BURST_WINDOW_MS
+#define CONFIG_APP_HLS_LOG_BURST_WINDOW_MS 10000
 #endif
 
 #define HLS_LOG_KEY_MAX 48
@@ -47,11 +47,11 @@ static hls_log_slot_t *hls_log_get_slot(const char *key)
 
 hls_log_mode_t hls_log_get_mode(void)
 {
-#if CONFIG_HLS_LOG_MODE_DIAG_HEAVY
+#if CONFIG_APP_HLS_LOG_MODE_DIAG_HEAVY
     return HLS_LOG_MODE_DIAG_HEAVY;
-#elif CONFIG_HLS_LOG_MODE_DIAG_LIGHT
+#elif CONFIG_APP_HLS_LOG_MODE_DIAG_LIGHT
     return HLS_LOG_MODE_DIAG_LIGHT;
-#elif CONFIG_HLS_LOG_MODE_RUN
+#elif CONFIG_APP_HLS_LOG_MODE_RUN
     return HLS_LOG_MODE_RUN;
 #else
     return HLS_LOG_MODE_PROD;

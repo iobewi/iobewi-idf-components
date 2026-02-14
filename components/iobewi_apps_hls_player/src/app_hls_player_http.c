@@ -133,8 +133,8 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
             size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
             int64_t waited_ms = (now_us - wait_begin_us) / 1000;
 
-            if (hls_log_throttle_time("rb_send_wait", CONFIG_HLS_LOG_THROTTLE_MS) &&
-                hls_log_throttle_burst("rb_send_wait", CONFIG_HLS_LOG_BURST_COUNT, CONFIG_HLS_LOG_BURST_WINDOW_MS)) {
+            if (hls_log_throttle_time("rb_send_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
+                hls_log_throttle_burst("rb_send_wait", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
                 ESP_LOGW(TAG,
                          "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
                          level,
@@ -578,7 +578,7 @@ static esp_err_t hls_http_commit_staged_segment(app_hls_player_t *handle,
 
     if (rb_wait_ms >= COMMIT_WAIT_WARN_MS &&
         hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-        hls_log_throttle_time("commit_wait", CONFIG_HLS_LOG_THROTTLE_MS)) {
+        hls_log_throttle_time("commit_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
         ESP_LOGW(TAG, "COMMIT wait rb=%d%% waited_ms=%lld bytes=%u",
                  hls_ringbuf_level_pct(handle),
                  (long long)rb_wait_ms,

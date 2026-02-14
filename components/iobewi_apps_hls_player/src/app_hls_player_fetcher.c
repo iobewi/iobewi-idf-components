@@ -297,7 +297,7 @@ void hls_fetch_task(void *pvParameters)
                 lib_m3u8_parser_free(&playlist);
                 playlist_valid = false;
                 if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                    hls_log_throttle_time("fetch_timing_early_wait", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                    hls_log_throttle_time("fetch_timing_early_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                     ESP_LOGI(TAG, "[TIMING] fetch cycle early-wait: %lld ms",
                              (long long)((esp_timer_get_time() - cycle_start_us) / 1000));
                 }
@@ -404,7 +404,7 @@ void hls_fetch_task(void *pvParameters)
         if (ts_admission_blocked && level <= admission_low) {
             ts_admission_blocked = false;
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                hls_log_throttle_time("ts_admission_resume", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", level, admission_high, admission_low);
             }
         }
@@ -412,7 +412,7 @@ void hls_fetch_task(void *pvParameters)
         if ((!ts_admission_blocked && level >= admission_high) ||
             (ts_admission_blocked && level > admission_low)) {
             ts_admission_blocked = true;
-            if (hls_log_throttle_time("ts_admission_block", CONFIG_HLS_LOG_THROTTLE_MS)) {
+            if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", level, admission_high, admission_low);
             }
             handle->is_downloading = false;
@@ -454,7 +454,7 @@ void hls_fetch_task(void *pvParameters)
 
         if (to_download_count > 0) {
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                hls_log_throttle_time("cycle_download", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                hls_log_throttle_time("cycle_download", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGI(TAG, "Cycle download %d seg: seq %lld .. %lld (rb=%d%%)",
                          to_download_count,
                          (long long)playlist.segments[to_download[0]].sequence,
@@ -466,7 +466,7 @@ void hls_fetch_task(void *pvParameters)
             int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
             if (oldest_in_playlist <= last_sequence_number + 1) {
                 if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                    hls_log_throttle_time("no_next_segment", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                    hls_log_throttle_time("no_next_segment", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                     ESP_LOGI(TAG, "No next segment yet (wanted=%lld, last=%lld, window=[%lld..%lld], count=%d) - wait",
                              (long long)wanted_seq,
                              (long long)last_sequence_number,
@@ -506,7 +506,7 @@ void hls_fetch_task(void *pvParameters)
                 if (ts_admission_blocked && seg_level <= admission_low) {
                     ts_admission_blocked = false;
                     if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                        hls_log_throttle_time("ts_admission_resume", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                        hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                         ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", seg_level, admission_high, admission_low);
                     }
                 }
@@ -514,7 +514,7 @@ void hls_fetch_task(void *pvParameters)
                 if ((!ts_admission_blocked && seg_level >= admission_high) ||
                     (ts_admission_blocked && seg_level > admission_low)) {
                     ts_admission_blocked = true;
-                    if (hls_log_throttle_time("ts_admission_block", CONFIG_HLS_LOG_THROTTLE_MS)) {
+                    if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                         ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", seg_level, admission_high, admission_low);
                     }
                     if (!hls_interruptible_delay_ms(100)) {
@@ -526,7 +526,7 @@ void hls_fetch_task(void *pvParameters)
             }
 
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_HEAVY) &&
-                hls_log_throttle_every_n("segment_download", CONFIG_HLS_LOG_SAMPLE_N_SLOW)) {
+                hls_log_throttle_every_n("segment_download", CONFIG_APP_HLS_LOG_SAMPLE_N_SLOW)) {
                 ESP_LOGI(TAG, "Téléchargement segment %lld (%d/%d)%s",
                          (long long)seg->sequence, (k + 1), to_download_count,
                          (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) ? " [DISCONTINUITY]" : "");
@@ -562,7 +562,7 @@ void hls_fetch_task(void *pvParameters)
             }
 
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                hls_log_throttle_every_n("segment_metrics", CONFIG_HLS_LOG_SAMPLE_N_FAST)) {
+                hls_log_throttle_every_n("segment_metrics", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
                 ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
                          (long long)seg->sequence,
                          handle->last_seg_metrics.reuse ? 1 : 0,
@@ -596,8 +596,8 @@ void hls_fetch_task(void *pvParameters)
                 }
 
                 if (seg_ms >= warn_ts_ms) {
-                    if (hls_log_throttle_burst("ts_slow", CONFIG_HLS_LOG_BURST_COUNT, CONFIG_HLS_LOG_BURST_WINDOW_MS) &&
-                        hls_log_throttle_time("ts_slow", CONFIG_HLS_LOG_THROTTLE_MS)) ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d)",
+                    if (hls_log_throttle_burst("ts_slow", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS) &&
+                        hls_log_throttle_time("ts_slow", CONFIG_APP_HLS_LOG_THROTTLE_MS)) ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d)",
                              (long long)seg->sequence, (long long)seg_ms, warn_ts_ms,
                              (long long)handle->last_seg_metrics.open_ms,
                              (long long)handle->last_seg_metrics.headers_ms,
@@ -639,7 +639,7 @@ void hls_fetch_task(void *pvParameters)
             int64_t other_ms = 0;
             hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
 
-            if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) && hls_log_throttle_time("fetch_cycle_hole", CONFIG_HLS_LOG_THROTTLE_MS)) ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
+            if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) && hls_log_throttle_time("fetch_cycle_hole", CONFIG_APP_HLS_LOG_THROTTLE_MS)) ESP_LOGI(TAG, "[TIMING] fetch cycle hole: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                      (long long)cycle_ms,
                      downloaded_segments, advanced_segments, level, segments_per_cycle,
                      (long long)last_sequence_number,
@@ -680,7 +680,7 @@ void hls_fetch_task(void *pvParameters)
                 hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms,
                                            &cycle_ms, &other_ms);
 
-                if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) && hls_log_throttle_time("fetch_cycle_resync", CONFIG_HLS_LOG_THROTTLE_MS)) ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
+                if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) && hls_log_throttle_time("fetch_cycle_resync", CONFIG_APP_HLS_LOG_THROTTLE_MS)) ESP_LOGI(TAG, "[TIMING] fetch cycle resync: %lld ms (ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lld other=%lld m3u8_top=%lld m3u8_media=%lld)",
                          (long long)cycle_ms,
                          downloaded_segments, advanced_segments, level, segments_per_cycle,
                          (long long)last_sequence_number,
@@ -708,7 +708,7 @@ void hls_fetch_task(void *pvParameters)
         hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
 
         if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
-            hls_log_throttle_time("fetch_cycle_summary", CONFIG_HLS_LOG_SUMMARY_PERIOD_MS)) {
+            hls_log_throttle_time("fetch_cycle_summary", CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS)) {
             ESP_LOGI(TAG, "FETCH_SUMMARY cycle=%lldms ok=%d advanced=%d rb=%d%% spc=%d last=%lld ts_sum=%lldms other=%lldms m3u8_top=%lldms m3u8_media=%lldms",
                      (long long)cycle_ms,
                      downloaded_segments, advanced_segments, level, segments_per_cycle,
