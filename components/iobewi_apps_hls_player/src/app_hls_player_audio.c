@@ -129,7 +129,8 @@ void hls_audio_play_task(void *pvParameters)
 
     int zero_consume_streak = 0;
     int resync_count = 0;
-    int no_data_streak = 0;  // [DIAG LAG] Compteur underrun
+    int no_data_streak = 0;  // streak underrun (cycles consécutifs)
+    uint32_t underrun_count = 0;
 
     // [FIX AAC error:30] Protection post-resync : évite re-resync immédiat / faux positifs
     // Après un NOTIF_RESYNC, protège N cycles (force remplissage gather_buf)
@@ -205,27 +206,32 @@ void hls_audio_play_task(void *pvParameters)
         }
 #endif
 
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
         int64_t now_hb = esp_timer_get_time();
         if (now_hb - last_heartbeat_us > (int64_t)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS * 1000) {
             int frames_decoded = decode_count - last_decode_count;
             float decode_rate = frames_decoded / ((float)CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS / 1000.0f);
 
-            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-            size_t rb_used = handle->buffer_size - rb_free;
-            float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
-
             if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
                 hls_log_throttle_time("audio_summary", CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS)) {
-                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%.0f%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun=%d",
+#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
+                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+                size_t rb_used = handle->buffer_size - rb_free;
+                float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
+                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%.0f%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
                          decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
-                         (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count, no_data_streak);
+                         (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count,
+                         (unsigned long)underrun_count, no_data_streak);
+#else
+                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
+                         decode_rate, leftover_len,
+                         (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count,
+                         (unsigned long)underrun_count, no_data_streak);
+#endif
             }
 
             last_heartbeat_us = now_hb;
             last_decode_count = decode_count;
         }
-#endif
 
         // === 1) Gestion notifications STOP/RESET/RESYNC ===
         uint32_t notif = 0;
@@ -540,6 +546,7 @@ void hls_audio_play_task(void *pvParameters)
 
             // Log UNDERRUN seulement si ça dure (>= 10 cycles = ~200-400ms)
             if (no_data_streak >= 10) {
+                underrun_count++;
                 ESP_LOGW(TAG, "[AUDIO UNDERRUN] gather=%zu/%zu bytes, buffer=%d%%, items=%d, fails=%d, stall=%d",
                          gather_len, min_gather, buffer_level, items_copied, receive_fails, stall);
 
