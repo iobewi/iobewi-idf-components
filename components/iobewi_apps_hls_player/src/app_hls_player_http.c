@@ -597,6 +597,15 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
         handle->last_seg_metrics.retried = true;
         handle->last_seg_metrics.reuse = false;
+
+        // Retry must restart segment byte-based metrics from zero.
+        // Otherwise bytes from attempt #1 can mask an early EOF in attempt #2.
+        handle->last_seg_metrics.body_bytes = 0;
+        handle->last_seg_metrics.body_read_ms = 0;
+        handle->last_seg_metrics.rb_wait_ms = 0;
+        handle->last_seg_metrics.read_calls = 0;
+        handle->last_seg_metrics.max_read_block_ms = 0;
+
         hls_http_ts_client_cleanup(handle);
 
         client = hls_http_ts_client_get_or_create(handle, url, NULL);
