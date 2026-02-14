@@ -42,14 +42,15 @@ menu "HLS Player Configuration"
             - 16 KB: maximum, use only if experiencing frequent decode errors
 
     config APP_HLS_PLAYER_DROP_OLD_ON_FULL
-        bool "Enable drop-old strategy when ring buffer full"
-        default y
+        bool "Enable legacy drop-old strategy when ring buffer full"
+        default n
         help
             When enabled, if the ring buffer is full, the oldest items are dropped
             until a PUSI boundary (PES start) is found, then the new data is inserted.
 
-            This maintains live-ness for streaming (drop old data rather than block).
-            Disable only for testing or if you need strict packet ordering.
+            Legacy behavior: maintains live-ness by discarding old TS packets.
+            This can corrupt PES/AAC continuity and produce audible jumps.
+            Recommended: keep disabled and rely on backpressure.
 
     config APP_HLS_PLAYER_STACK_DIAG
         bool "Enable stack diagnostics (HWM logging)"
@@ -103,5 +104,22 @@ menu "HLS Player Configuration"
         range 30 90
         help
             Ringbuffer occupancy threshold (%) to resume after backpressure pause.
+
+
+    config APP_HLS_PLAYER_TS_ADMISSION_HIGH
+        int "TS admission high threshold (%)"
+        default 75
+        range 40 95
+        help
+            Ringbuffer occupancy threshold (%) above which fetcher will not start
+            a new TS segment download.
+
+    config APP_HLS_PLAYER_TS_ADMISSION_LOW
+        int "TS admission low threshold (%)"
+        default 55
+        range 20 90
+        help
+            Ringbuffer occupancy threshold (%) below which fetcher resumes TS
+            downloads after an admission block.
 
 endmenu

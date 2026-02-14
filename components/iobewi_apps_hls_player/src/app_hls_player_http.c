@@ -7,7 +7,11 @@
 #include "app_hls_player/app_hls_player_internal.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "esp_crt_bundle.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -18,6 +22,10 @@ static const char *TAG = "hls_http";
 // 4KB suffisant pour streaming (chunks typiques ~2-8KB)
 // Si instabilité réseau/TLS : augmenter à 8KB
 #define HTTP_BUFFER_SIZE (4 * 1024)
+#define SEGMENT_STAGE_CHUNK_SIZE (16 * 1024)
+#define SEGMENT_STAGE_MIN_SIZE (16 * 1024)
+#define SEGMENT_STAGE_MAX_SIZE (256 * 1024)
+#define COMMIT_WAIT_WARN_MS 250
 
 /**
  * @brief Helper pour lire header Location de manière sécurisée
@@ -50,260 +58,586 @@ static bool get_location_header(esp_http_client_handle_t client, char *buf, size
     return false;
 }
 
-/**
- * @brief Callback HTTP pour recevoir les données
- * Drop-old strategy pour meilleure live-ness
- */
-static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+static int hls_ringbuf_level_pct(app_hls_player_t *handle)
 {
-    app_hls_player_t *handle = (app_hls_player_t *)evt->user_data;
+    size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+    size_t rb_used = handle->buffer_size - rb_free;
+    return (int)((rb_used * 100u) / handle->buffer_size);
+}
 
-    switch (evt->event_id) {
-        case HTTP_EVENT_ON_DATA:
-            if (evt->data_len > 0 && handle->ring_buffer) {
-                // [TS ALIGNMENT] Alignement TS 188-byte sans malloc pour stabilité
-                const uint8_t *src = (const uint8_t *)evt->data;
-                size_t src_len = (size_t)evt->data_len;
-
-                // 1) Si carry existe, compléter jusqu'à 188
-                if (handle->ts_carry_len > 0) {
-                    size_t need = 188 - handle->ts_carry_len;
-                    size_t take = (src_len < need) ? src_len : need;
-
-                    memcpy(handle->ts_carry + handle->ts_carry_len, src, take);
-                    handle->ts_carry_len += take;
-                    src += take;
-                    src_len -= take;
-
-                    // Si on a un paquet TS complet, l'envoyer
-                    if (handle->ts_carry_len == 188) {
-                        bool sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
-#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
-                        if (!sent_ok) {
-                            // Drop jusqu'à trouver une frontière PES (PUSI=1)
-                            bool dropped = false;
-                            int drop_count = 0;
-                            for (int attempt = 0; attempt < 20 && !dropped; attempt++) {
-                                size_t drop_sz = 0;
-                                void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
-                                if (!drop) break;
-
-                                // Défensif: vérifier taille avant d'accéder au contenu
-                                if (drop_sz != 188) {
-                                    vRingbufferReturnItem(handle->ring_buffer, drop);
-                                    handle->drop_old_count++;
-                                    handle->bad_item_size_count++;
-                                    drop_count++;
-
-                                    // Corruption détectée : log rate-limited + forcer resync soft
-                                    if ((handle->bad_item_size_count % 50) == 0) {
-                                        ESP_LOGW(TAG, "Ring item size=%zu (expected 188) [x%u]",
-                                                 drop_sz, handle->bad_item_size_count);
-                                    }
-                                    hls_rate_limited_resync(handle);
-                                    continue;
-                                }
-
-                                uint8_t *ts = (uint8_t *)drop;
-                                bool is_pusi = (ts[0] == 0x47 && (ts[1] & 0x40) != 0);
-
-                                vRingbufferReturnItem(handle->ring_buffer, drop);
-                                handle->drop_old_count++;
-                                drop_count++;
-
-                                if (is_pusi) {
-                                    dropped = true;
-
-                                    if (handle->play_task && (handle->drop_old_count % 50) == 0) {
-                                        xTaskNotify(handle->play_task, NOTIF_RESYNC, eSetBits);
-                                    }
-
-                                    sent_ok = (xRingbufferSend(handle->ring_buffer, handle->ts_carry, 188, 0) == pdTRUE);
-                                    if (sent_ok) {
-                                        handle->drop_recover_count++;
-                                        if ((handle->drop_old_count % 100) == 0) {
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                                            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                                            size_t rb_used = handle->buffer_size - rb_free;
-                                            ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry] RB: %zu/%zu KB %.0f%%",
-                                                     (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
-                                                     (rb_used*100.0f)/handle->buffer_size);
+static bool rb_wait_for_space(app_hls_player_t *handle, int timeout_ms)
+{
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+    const int low_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW;
 #else
-                                            ESP_LOGI(TAG, "Drop-old (x%u) [PUSI/carry]", (unsigned)handle->drop_old_count);
+    (void)timeout_ms;
+    (void)handle;
+    return true;
 #endif
-                                        }
-                                    }
-                                }
-                            }
 
-                            // Fallback: si pas de PUSI trouvé après 20 tentatives, force resync soft (rate-limited)
-                            if (!dropped && drop_count > 0) {
-                                hls_rate_limited_resync(handle);
-                            }
-                        }
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+    int64_t t0_us = esp_timer_get_time();
+    while (true) {
+        if (!handle->is_downloading) {
+            return false;
+        }
+
+        if (hls_ringbuf_level_pct(handle) <= low_wm) {
+            return true;
+        }
+
+        if (timeout_ms >= 0) {
+            int64_t elapsed_ms = (esp_timer_get_time() - t0_us) / 1000;
+            if (elapsed_ms >= timeout_ms) {
+                return false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
 #endif
-                        if (sent_ok) {
-                            // Compteur lock-free: cohérent avec les autres chemins HTTP
-                            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-                        } else {
-                            handle->drop_count++;
-                            if ((handle->drop_count % 100) == 0) {
-                                ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
-                            }
-                        }
+}
 
-                        handle->ts_carry_len = 0;
-                    }
-                }
+static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t *pkt188)
+{
+    if (handle == NULL || handle->ring_buffer == NULL || pkt188 == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-                // 2) [FIX CRITIQUE] Envoyer paquet-par-paquet (188) pour drop-old granulaire
-                // Avant: bulk aligné (3948 bytes) → drop 21 paquets d'un coup → corruption TS massive
-                // Après: 188 bytes → drop 1 paquet max → corruption minimale
-                while (src_len >= 188) {
-                    bool sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
-#if CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL
-                    if (!sent_ok) {
-                        // Drop jusqu'à trouver une frontière PES (PUSI=1) pour éviter
-                        // de casser une AAC frame fragmentée sur plusieurs TS
-                        bool dropped = false;
-                        int drop_count = 0;
-                        for (int attempt = 0; attempt < 20 && !dropped; attempt++) {
-                            size_t drop_sz = 0;
-                            void *drop = xRingbufferReceive(handle->ring_buffer, &drop_sz, 0);
-                            if (!drop) break;
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+    const int high_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
+    const int low_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW;
+#endif
 
-                            // Défensif: vérifier taille avant d'accéder au contenu
-                            if (drop_sz != 188) {
-                                vRingbufferReturnItem(handle->ring_buffer, drop);
-                                handle->drop_old_count++;
-                                handle->bad_item_size_count++;
-                                drop_count++;
+    int64_t wait_begin_us = 0;
+    int64_t last_wait_log_us = 0;
 
-                                // Corruption détectée : log rate-limited + forcer resync soft
-                                if ((handle->bad_item_size_count % 50) == 0) {
-                                    ESP_LOGW(TAG, "Ring item size=%zu (expected 188) [x%u]",
-                                             drop_sz, handle->bad_item_size_count);
-                                }
-                                hls_rate_limited_resync(handle);
-                                continue;
-                            }
+    while (true) {
+        if (!handle->is_downloading) {
+            return ESP_ERR_INVALID_STATE;
+        }
 
-                            uint8_t *ts = (uint8_t *)drop;
-                            bool is_pusi = (ts[0] == 0x47 && (ts[1] & 0x40) != 0);
+        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, 0) == pdTRUE) {
+            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
+            return ESP_OK;
+        }
 
-                            // Compter tous les drops (PUSI + non-PUSI)
-                            vRingbufferReturnItem(handle->ring_buffer, drop);
-                            handle->drop_old_count++;
-                            drop_count++;
+        int64_t now_us = esp_timer_get_time();
+        if (wait_begin_us == 0) {
+            wait_begin_us = now_us;
+            last_wait_log_us = now_us;
+        }
 
-                            if (is_pusi) {
-                                // Frontière PES trouvée : arrêter
-                                dropped = true;
+        if ((now_us - last_wait_log_us) >= (250 * 1000)) {
+            int level = hls_ringbuf_level_pct(handle);
+            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+            int64_t waited_ms = (now_us - wait_begin_us) / 1000;
 
-                                // Soft resync côté play task (rare)
-                                if (handle->play_task && (handle->drop_old_count % 50) == 0) {
-                                    xTaskNotify(handle->play_task, NOTIF_RESYNC, eSetBits);
-                                }
-
-                                sent_ok = (xRingbufferSend(handle->ring_buffer, src, 188, 0) == pdTRUE);
-                                if (sent_ok) {
-                                    handle->drop_recover_count++;
-                                    if ((handle->drop_old_count % 100) == 0) {
-#if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                                        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                                        size_t rb_used = handle->buffer_size - rb_free;
-                                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI] RB: %zu/%zu KB %.0f%%",
-                                                 (unsigned)handle->drop_old_count, rb_used/1024, handle->buffer_size/1024,
-                                                 (rb_used*100.0f)/handle->buffer_size);
+            ESP_LOGW(TAG,
+                     "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
+                     level,
+                     (long long)waited_ms,
+                     (unsigned)rb_free,
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+                     high_wm,
+                     low_wm
 #else
-                                        ESP_LOGI(TAG, "Drop-old (x%u) [PUSI]", (unsigned)handle->drop_old_count);
+                     -1,
+                     -1
 #endif
-                                    }
-                                }
-                            }
-                        }
+            );
+            last_wait_log_us = now_us;
+        }
 
-                        // Fallback: si pas de PUSI trouvé après 20 tentatives, force resync soft (rate-limited)
-                        if (!dropped && drop_count > 0) {
-                            hls_rate_limited_resync(handle);
-                        }
-                    }
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+        if (hls_ringbuf_level_pct(handle) >= high_wm) {
+            if (!rb_wait_for_space(handle, -1)) {
+                return ESP_ERR_INVALID_STATE;
+            }
+            continue;
+        }
 #endif
-                    if (sent_ok) {
-                        // Compteur lock-free: évite de bloquer le callback HTTP
-                        __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-                    } else {
-                        handle->drop_count++;
-                        if ((handle->drop_count % 100) == 0) {
-                            ESP_LOGW(TAG, "Ring buffer plein (x%u)", (unsigned)handle->drop_count);
-                        }
-                    }
 
-                    src += 188;
-                    src_len -= 188;
-                }
+        // Ringbuffer momentanément saturé: céder puis réessayer (no-drop)
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
 
-                // 3) Reste (<188) -> carry (append)
-                if (src_len > 0) {
-                    // src_len < 188 garanti ici
-                    memcpy(handle->ts_carry, src, src_len);
-                    handle->ts_carry_len = src_len;
+/**
+ * @brief Envoi TS avec mesure du temps passé en backpressure
+ */
+static esp_err_t rb_send_ts_backpressure_timed(app_hls_player_t *handle,
+                                               const uint8_t *pkt188,
+                                               int64_t *rb_wait_us)
+{
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = rb_send_ts_backpressure(handle, pkt188);
+    if (rb_wait_us != NULL) {
+        *rb_wait_us += (esp_timer_get_time() - t0);
+    }
+    return err;
+}
+
+static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
+                                      const uint8_t *src,
+                                      size_t src_len,
+                                      int64_t *rb_wait_us)
+{
+    if (handle == NULL || src == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (handle->ts_carry_len > 0) {
+        size_t need = 188 - handle->ts_carry_len;
+        size_t take = (src_len < need) ? src_len : need;
+
+        memcpy(handle->ts_carry + handle->ts_carry_len, src, take);
+        handle->ts_carry_len += take;
+        src += take;
+        src_len -= take;
+
+        if (handle->ts_carry_len == 188) {
+            esp_err_t err = rb_send_ts_backpressure_timed(handle, handle->ts_carry, rb_wait_us);
+            if (err != ESP_OK) {
+                return err;
+            }
+            handle->ts_carry_len = 0;
+        }
+    }
+
+    while (src_len >= 188) {
+        esp_err_t err = rb_send_ts_backpressure_timed(handle, src, rb_wait_us);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        src += 188;
+        src_len -= 188;
+    }
+
+    if (src_len > 0) {
+        memcpy(handle->ts_carry, src, src_len);
+        handle->ts_carry_len = src_len;
+    }
+
+    return ESP_OK;
+}
+
+static bool hls_parse_ts_url(const char *url,
+                             char *host,
+                             size_t host_size,
+                             int *port,
+                             esp_http_client_transport_t *transport)
+{
+    if (!url || !host || host_size == 0 || !port || !transport) {
+        return false;
+    }
+
+    const char *scheme_end = strstr(url, "://");
+    if (!scheme_end) {
+        return false;
+    }
+
+    size_t scheme_len = (size_t)(scheme_end - url);
+    const bool is_https = (scheme_len == 5) && (strncmp(url, "https", 5) == 0);
+    const bool is_http = (scheme_len == 4) && (strncmp(url, "http", 4) == 0);
+    if (!is_http && !is_https) {
+        return false;
+    }
+
+    const char *authority = scheme_end + 3;
+    const char *path = strpbrk(authority, "/?#");
+    size_t authority_len = path ? (size_t)(path - authority) : strlen(authority);
+    if (authority_len == 0) {
+        return false;
+    }
+
+    const char *host_start = authority;
+    if (*host_start == '[') {
+        const char *close_br = memchr(host_start, ']', authority_len);
+        if (!close_br) {
+            return false;
+        }
+
+        // IPv6 host retourné sans crochets pour compat avec config.host
+        size_t host_len = (size_t)(close_br - (host_start + 1));
+        if (host_len == 0 || host_len >= host_size) {
+            return false;
+        }
+        memcpy(host, host_start + 1, host_len);
+        host[host_len] = '\0';
+
+        const char *port_ptr = close_br + 1;
+        if ((size_t)(port_ptr - authority) < authority_len && *port_ptr == ':') {
+            *port = atoi(port_ptr + 1);
+        } else {
+            *port = is_https ? 443 : 80;
+        }
+    } else {
+        const char *colon = memchr(host_start, ':', authority_len);
+        size_t host_len = colon ? (size_t)(colon - host_start) : authority_len;
+        if (host_len == 0 || host_len >= host_size) {
+            return false;
+        }
+
+        memcpy(host, host_start, host_len);
+        host[host_len] = '\0';
+
+        if (colon) {
+            *port = atoi(colon + 1);
+        } else {
+            *port = is_https ? 443 : 80;
+        }
+    }
+
+    if (*port <= 0) {
+        *port = is_https ? 443 : 80;
+    }
+
+    *transport = is_https ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP;
+    return true;
+}
+
+void hls_http_ts_client_cleanup(app_hls_player_t *handle)
+{
+    if (!handle) {
+        return;
+    }
+
+    if (handle->ts_http_client) {
+        esp_http_client_close(handle->ts_http_client);
+        esp_http_client_cleanup(handle->ts_http_client);
+        handle->ts_http_client = NULL;
+    }
+
+    handle->ts_client_ready = false;
+    handle->ts_host[0] = '\0';
+    handle->ts_port = 0;
+    handle->ts_transport = HTTP_TRANSPORT_UNKNOWN;
+}
+
+static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_t *handle,
+                                                                  const char *url,
+                                                                  bool *reuse_hit)
+{
+    if (!handle || !url) {
+        return NULL;
+    }
+
+    char parsed_host[sizeof(handle->ts_host)] = {0};
+    int parsed_port = 0;
+    esp_http_client_transport_t parsed_transport = HTTP_TRANSPORT_UNKNOWN;
+    if (!hls_parse_ts_url(url, parsed_host, sizeof(parsed_host), &parsed_port, &parsed_transport)) {
+        ESP_LOGE(TAG, "TS_CLIENT parse_url failed: %s", url);
+        return NULL;
+    }
+
+    bool needs_recreate = false;
+    const char *reason = "none";
+    if (!handle->ts_http_client || !handle->ts_client_ready) {
+        needs_recreate = true;
+        reason = "init";
+    } else if ((handle->ts_port != parsed_port) ||
+               (handle->ts_transport != parsed_transport) ||
+               (strcmp(handle->ts_host, parsed_host) != 0)) {
+        needs_recreate = true;
+        reason = "host_change";
+    }
+
+    if (reuse_hit) {
+        *reuse_hit = !needs_recreate;
+    }
+
+    if (!needs_recreate) {
+        return handle->ts_http_client;
+    }
+
+    if (handle->ts_http_client) {
+        ESP_LOGI(TAG, "TS_CLIENT recreate reason=%s old=%s:%d", reason, handle->ts_host, handle->ts_port);
+        hls_http_ts_client_cleanup(handle);
+    }
+
+    // Copie persistante avant init: évite de pointer sur parsed_host (stack)
+    strlcpy(handle->ts_host, parsed_host, sizeof(handle->ts_host));
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .host = handle->ts_host,
+        .port = parsed_port,
+        .buffer_size = HTTP_BUFFER_SIZE,
+        .timeout_ms = 5000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_redirect = true,
+        .keep_alive_enable = true,
+        .transport_type = parsed_transport,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "TS_CLIENT recreate reason=init_err url=%s", url);
+        handle->ts_client_ready = false;
+        return NULL;
+    }
+
+    handle->ts_http_client = client;
+    handle->ts_client_ready = true;
+    handle->ts_port = parsed_port;
+    handle->ts_transport = parsed_transport;
+
+    ESP_LOGI(TAG, "TS_CLIENT recreate reason=%s new=%s:%d transport=%d", reason,
+             handle->ts_host, handle->ts_port, (int)handle->ts_transport);
+    return handle->ts_http_client;
+}
+
+static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
+                                                esp_http_client_handle_t client,
+                                                const char *url,
+                                                bool *network_error,
+                                                uint8_t **segment_stage,
+                                                size_t *segment_stage_len)
+{
+    if (network_error) {
+        *network_error = false;
+    }
+
+    esp_err_t err = esp_http_client_set_url(client, url);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "TS_CLIENT set_url failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    int64_t open_t0 = esp_timer_get_time();
+    err = esp_http_client_open(client, 0);
+    handle->last_seg_metrics.open_ms += (esp_timer_get_time() - open_t0) / 1000;
+    if (err != ESP_OK) {
+        if (network_error) {
+            *network_error = true;
+        }
+        ESP_LOGW(TAG, "TS_CLIENT open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    int64_t hdr_t0 = esp_timer_get_time();
+    int length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    handle->last_seg_metrics.headers_ms += (esp_timer_get_time() - hdr_t0) / 1000;
+    ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
+
+    if (status != 200 && status != 206) {
+        if (status >= 300 && status < 400) {
+            char location_buf[256];
+            if (get_location_header(client, location_buf, sizeof(location_buf))) {
+                ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status, location_buf);
+            } else {
+                ESP_LOGW(TAG, "HTTP redirection %d → (Location manquant)", status);
+            }
+        } else {
+            ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
+        }
+        esp_http_client_close(client);
+        return ESP_FAIL;
+    }
+
+    int64_t body_t0 = esp_timer_get_time();
+    uint8_t *buffer = malloc(HTTP_BUFFER_SIZE);
+    size_t stage_len = 0;
+    size_t stage_capacity = 0;
+    uint8_t *stage = NULL;
+
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "Échec alloc buffer HTTP segment (%u bytes)", (unsigned)HTTP_BUFFER_SIZE);
+        esp_http_client_close(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (segment_stage == NULL || segment_stage_len == NULL) {
+        free(buffer);
+        esp_http_client_close(client);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (length > 0) {
+        size_t prealloc = (size_t)length;
+        if (prealloc < SEGMENT_STAGE_MIN_SIZE) {
+            prealloc = SEGMENT_STAGE_MIN_SIZE;
+        }
+        if (prealloc > SEGMENT_STAGE_MAX_SIZE) {
+            ESP_LOGE(TAG, "Segment trop grand pour staging prealloc: len=%d max=%u url=%s",
+                     length,
+                     (unsigned)SEGMENT_STAGE_MAX_SIZE,
+                     url ? url : "(null)");
+            free(buffer);
+            esp_http_client_close(client);
+            return ESP_ERR_NO_MEM;
+        }
+        stage = malloc(prealloc);
+        if (stage == NULL) {
+            ESP_LOGE(TAG, "Échec alloc staging segment prealloc (%u bytes)", (unsigned)prealloc);
+            free(buffer);
+            esp_http_client_close(client);
+            return ESP_ERR_NO_MEM;
+        }
+        stage_capacity = prealloc;
+    }
+
+    while (true) {
+        int64_t read_t0 = esp_timer_get_time();
+        int read = esp_http_client_read(client, (char *)buffer, HTTP_BUFFER_SIZE);
+        int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
+
+        handle->last_seg_metrics.read_calls++;
+        if (read_block_ms > handle->last_seg_metrics.max_read_block_ms) {
+            handle->last_seg_metrics.max_read_block_ms = read_block_ms;
+        }
+
+        if (read < 0) {
+            if (network_error) {
+                *network_error = true;
+            }
+            ESP_LOGW(TAG, "Erreur read segment: %d", read);
+            err = ESP_FAIL;
+            break;
+        }
+        if (read == 0) {
+            if (length > 0 && handle->last_seg_metrics.body_bytes < (size_t)length) {
+                if (network_error) {
+                    *network_error = true;
                 }
+                ESP_LOGW(TAG, "EOF précoce segment: status=%d got=%u expected=%d url=%s", status,
+                         (unsigned)handle->last_seg_metrics.body_bytes, length, url ? url : "(null)");
+                err = ESP_FAIL;
+            } else {
+                err = ESP_OK;
             }
             break;
-        default:
-            break;
+        }
+
+        handle->last_seg_metrics.body_bytes += (size_t)read;
+
+        size_t wanted = stage_len + (size_t)read;
+        if (wanted > stage_capacity) {
+            size_t new_capacity = stage_capacity;
+            while (new_capacity < wanted) {
+                new_capacity += SEGMENT_STAGE_CHUNK_SIZE;
+            }
+            if (new_capacity > SEGMENT_STAGE_MAX_SIZE) {
+                ESP_LOGE(TAG, "Segment trop grand pour staging: %u bytes (max=%u) url=%s",
+                         (unsigned)wanted,
+                         (unsigned)SEGMENT_STAGE_MAX_SIZE,
+                         url ? url : "(null)");
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            uint8_t *new_stage = realloc(stage, new_capacity);
+            if (new_stage == NULL) {
+                ESP_LOGE(TAG, "Échec realloc staging segment (%u bytes)", (unsigned)new_capacity);
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            stage = new_stage;
+            stage_capacity = new_capacity;
+        }
+
+        memcpy(stage + stage_len, buffer, (size_t)read);
+        stage_len += (size_t)read;
     }
-    return ESP_OK;
+
+    handle->last_seg_metrics.body_read_ms += (esp_timer_get_time() - body_t0) / 1000;
+    free(buffer);
+    esp_http_client_close(client);
+
+    if (err != ESP_OK) {
+        free(stage);
+        return err;
+    }
+
+    *segment_stage = stage;
+    *segment_stage_len = stage_len;
+    return err;
+}
+
+static esp_err_t hls_http_commit_staged_segment(app_hls_player_t *handle,
+                                                const uint8_t *segment_stage,
+                                                size_t segment_stage_len)
+{
+    if (!handle || !segment_stage) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (handle->ts_carry_len != 0) {
+        ESP_LOGW(TAG, "SEGMENT_COMMIT carry_pending=%u before commit", (unsigned)handle->ts_carry_len);
+    }
+
+    int64_t rb_wait_us = 0;
+    esp_err_t err = hls_process_ts_chunk(handle, segment_stage, segment_stage_len, &rb_wait_us);
+    int64_t rb_wait_ms = rb_wait_us / 1000;
+    handle->last_seg_metrics.rb_wait_ms += rb_wait_ms;
+
+    if (rb_wait_ms >= COMMIT_WAIT_WARN_MS) {
+        ESP_LOGW(TAG, "COMMIT wait rb=%d%% waited_ms=%lld bytes=%u",
+                 hls_ringbuf_level_pct(handle),
+                 (long long)rb_wait_ms,
+                 (unsigned)segment_stage_len);
+    }
+
+    return err;
 }
 
 esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 {
+    int64_t seg_t0 = esp_timer_get_time();
+    memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
+
     ESP_LOGI(TAG, "Téléchargement: %s", url);
 
-    esp_http_client_config_t config = {
-        .url = url,
-        .event_handler = http_event_handler,
-        .user_data = handle,
-        .buffer_size = HTTP_BUFFER_SIZE,
-        .timeout_ms = 5000,  // FIX: 5s pour aligner avec timeout stop (évite timeout warnings)
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .disable_auto_redirect = true,  // FIX: Log "non suivie" cohérent
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        ESP_LOGE(TAG, "Échec d'initialisation du client HTTP");
+    bool reuse_hit = false;
+    esp_http_client_handle_t client = hls_http_ts_client_get_or_create(handle, url, &reuse_hit);
+    if (!client) {
+        handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
         return ESP_FAIL;
     }
+    handle->last_seg_metrics.reuse = reuse_hit;
 
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        int status = esp_http_client_get_status_code(client);
-        int length = esp_http_client_get_content_length(client);
-        ESP_LOGI(TAG, "HTTP Status=%d, Length=%d", status, length);
+    bool network_error = false;
+    uint8_t *segment_stage = NULL;
+    size_t segment_stage_len = 0;
+    esp_err_t err = hls_http_download_segment_once(handle, client, url, &network_error,
+                                                   &segment_stage, &segment_stage_len);
+    if (err != ESP_OK && network_error) {
+        ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
+        handle->last_seg_metrics.retried = true;
+        handle->last_seg_metrics.reuse = false;
 
-        // Traiter status != 200/206 comme erreur (évite dérive silencieuse)
-        if (status != 200 && status != 206) {
-            // Logger Location si redirection (debug terrain) - buffer local pour compat IDF
-            if (status >= 300 && status < 400) {
-                char location_buf[256];
-                if (get_location_header(client, location_buf, sizeof(location_buf))) {
-                    ESP_LOGW(TAG, "HTTP redirection %d → %s (non suivie)", status, location_buf);
-                } else {
-                    ESP_LOGW(TAG, "HTTP redirection %d → (Location manquant)", status);
-                }
-            } else {
-                ESP_LOGE(TAG, "HTTP status inattendu: %d (échec)", status);
-            }
-            err = ESP_FAIL;
+        hls_http_ts_client_cleanup(handle);
+
+        client = hls_http_ts_client_get_or_create(handle, url, NULL);
+        if (!client) {
+            handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
+            return err;
         }
-    } else {
-        ESP_LOGE(TAG, "Erreur HTTP: %s", esp_err_to_name(err));
+
+        // P1 fix: retry attempt must use fresh byte/timing counters.
+        // Otherwise attempt #1 body_bytes can mask an early EOF on attempt #2.
+        handle->last_seg_metrics.body_bytes = 0;
+        handle->last_seg_metrics.body_read_ms = 0;
+        handle->last_seg_metrics.rb_wait_ms = 0;
+        handle->last_seg_metrics.read_calls = 0;
+        handle->last_seg_metrics.max_read_block_ms = 0;
+
+        err = hls_http_download_segment_once(handle, client, url, NULL,
+                                             &segment_stage, &segment_stage_len);
     }
 
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
+    if (err == ESP_OK) {
+        err = hls_http_commit_staged_segment(handle, segment_stage, segment_stage_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "TS staged commit failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    free(segment_stage);
+
+    handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;
 }
 

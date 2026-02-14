@@ -8,7 +8,7 @@
  *
  * Caractéristiques :
  * - Alignement automatique TS 188-byte avec carry buffer
- * - Stratégie drop-old sur ringbuffer plein (live-ness)
+ * - Backpressure ringbuffer (blocage producteur sans perte TS)
  * - Support HTTPS avec certificats bundle
  * - Gestion redirections HTTP (détection, pas de suivi auto)
  * - Realloc progressif pour M3U8 (16-64 KB)
@@ -31,14 +31,14 @@ extern "C" {
  * - Télécharge le segment depuis l'URL fournie
  * - Aligne automatiquement les données sur 188-byte (MPEG-TS)
  * - Envoie les paquets TS dans le ring buffer du player
- * - Applique la stratégie drop-old si le buffer est plein (CONFIG_APP_HLS_PLAYER_DROP_OLD_ON_FULL)
+ * - Applique la backpressure quand le buffer est haut (CONFIG_APP_HLS_PLAYER_BACKPRESSURE)
  *
  * @param[in] handle Handle du player (accès au ring buffer et stats)
  * @param[in] url    URL complète du segment (HTTP ou HTTPS)
  *
  * @return
- *     - ESP_OK  : Segment téléchargé avec succès (status HTTP 200/206)
- *     - ESP_FAIL : Erreur HTTP, status inattendu, ou échec d'initialisation
+ *     - ESP_OK          : Segment téléchargé avec succès (status HTTP 200/206)
+ *     - ESP_FAIL        : Erreur HTTP, status inattendu, ou échec d'initialisation
  *
  * @note
  *     - Timeout : 5 secondes
@@ -47,6 +47,16 @@ extern "C" {
  *     - Alignement TS : carry buffer 188-byte dans handle->ts_carry
  */
 esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url);
+
+/**
+ * @brief Libère le client HTTP persistant utilisé pour les segments TS
+ *
+ * À appeler à l'arrêt/destroy du player, ou lors d'un recreate explicite.
+ * Safe si aucun client n'est actif.
+ *
+ * @param[in] handle Handle du player
+ */
+void hls_http_ts_client_cleanup(app_hls_player_t *handle);
 
 /**
  * @brief Télécharge une playlist M3U8 et retourne son contenu

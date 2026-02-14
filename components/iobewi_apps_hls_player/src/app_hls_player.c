@@ -270,6 +270,8 @@ esp_err_t app_hls_player_stop(app_hls_player_t *handle)
         handle->play_task = NULL;
     }
 
+    hls_http_ts_client_cleanup(handle);
+
     ESP_LOGI(TAG, "Player HLS arrêté");
     return ESP_OK;
 }
@@ -309,6 +311,8 @@ esp_err_t app_hls_player_del(app_hls_player_t *handle)
     }
 
     // Libérer les ressources
+    hls_http_ts_client_cleanup(handle);
+
     if (handle->ring_buffer) {
         vRingbufferDelete(handle->ring_buffer);
     }
