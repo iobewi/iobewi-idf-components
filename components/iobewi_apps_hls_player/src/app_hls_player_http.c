@@ -608,14 +608,6 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         handle->last_seg_metrics.retried = true;
         handle->last_seg_metrics.reuse = false;
 
-        // Retry must restart segment byte-based metrics from zero.
-        // Otherwise bytes from attempt #1 can mask an early EOF in attempt #2.
-        handle->last_seg_metrics.body_bytes = 0;
-        handle->last_seg_metrics.body_read_ms = 0;
-        handle->last_seg_metrics.rb_wait_ms = 0;
-        handle->last_seg_metrics.read_calls = 0;
-        handle->last_seg_metrics.max_read_block_ms = 0;
-
         hls_http_ts_client_cleanup(handle);
 
         client = hls_http_ts_client_get_or_create(handle, url, NULL);
@@ -623,6 +615,14 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
             handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
             return err;
         }
+
+        // P1 fix: retry attempt must use fresh byte/timing counters.
+        // Otherwise attempt #1 body_bytes can mask an early EOF on attempt #2.
+        handle->last_seg_metrics.body_bytes = 0;
+        handle->last_seg_metrics.body_read_ms = 0;
+        handle->last_seg_metrics.rb_wait_ms = 0;
+        handle->last_seg_metrics.read_calls = 0;
+        handle->last_seg_metrics.max_read_block_ms = 0;
 
         err = hls_http_download_segment_once(handle, client, url, NULL,
                                              &segment_stage, &segment_stage_len);
