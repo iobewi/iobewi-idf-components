@@ -1,5 +1,60 @@
 menu "HLS Player Configuration"
 
+    choice HLS_LOG_MODE
+        prompt "HLS log mode"
+        default HLS_LOG_MODE_PROD
+        help
+            Controls runtime observability verbosity for HLS player.
+
+            PROD: silent run (errors + critical warnings only)
+            RUN: PROD + sparse summaries
+            DIAG_LIGHT: RUN + throttled timing/heartbeat metrics
+            DIAG_HEAVY: DIAG_LIGHT + detailed traces and playlist dumps
+
+    config HLS_LOG_MODE_PROD
+        bool "PROD"
+
+    config HLS_LOG_MODE_RUN
+        bool "RUN"
+
+    config HLS_LOG_MODE_DIAG_LIGHT
+        bool "DIAG_LIGHT"
+
+    config HLS_LOG_MODE_DIAG_HEAVY
+        bool "DIAG_HEAVY"
+
+    endchoice
+
+    config HLS_LOG_THROTTLE_MS
+        int "HLS log throttle min interval (ms)"
+        default 5000
+        range 100 60000
+
+    config HLS_LOG_SUMMARY_PERIOD_MS
+        int "HLS summary period (ms)"
+        default 30000
+        range 1000 120000
+
+    config HLS_LOG_BURST_COUNT
+        int "HLS log burst count"
+        default 3
+        range 1 20
+
+    config HLS_LOG_BURST_WINDOW_MS
+        int "HLS log burst window (ms)"
+        default 10000
+        range 1000 120000
+
+    config HLS_LOG_SAMPLE_N_FAST
+        int "HLS fast-loop sample 1/N"
+        default 50
+        range 1 1000
+
+    config HLS_LOG_SAMPLE_N_SLOW
+        int "HLS slow-loop sample 1/N"
+        default 10
+        range 1 1000
+
     config APP_HLS_PLAYER_RING_BUFFER_SIZE
         int "Ring buffer size (KB)"
         default 512 if SPIRAM
