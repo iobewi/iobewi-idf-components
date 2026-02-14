@@ -22,6 +22,10 @@ static const char *TAG = "hls_http";
 // 4KB suffisant pour streaming (chunks typiques ~2-8KB)
 // Si instabilité réseau/TLS : augmenter à 8KB
 #define HTTP_BUFFER_SIZE (4 * 1024)
+#define SEGMENT_STAGE_CHUNK_SIZE (16 * 1024)
+#define SEGMENT_STAGE_MIN_SIZE (16 * 1024)
+#define SEGMENT_STAGE_MAX_SIZE (256 * 1024)
+#define COMMIT_WAIT_WARN_MS 250
 
 /**
  * @brief Helper pour lire header Location de manière sécurisée
@@ -102,11 +106,47 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
 
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
     const int high_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
+    const int low_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW;
 #endif
+
+    int64_t wait_begin_us = 0;
+    int64_t last_wait_log_us = 0;
 
     while (true) {
         if (!handle->is_downloading) {
             return ESP_ERR_INVALID_STATE;
+        }
+
+        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, 0) == pdTRUE) {
+            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
+            return ESP_OK;
+        }
+
+        int64_t now_us = esp_timer_get_time();
+        if (wait_begin_us == 0) {
+            wait_begin_us = now_us;
+            last_wait_log_us = now_us;
+        }
+
+        if ((now_us - last_wait_log_us) >= (250 * 1000)) {
+            int level = hls_ringbuf_level_pct(handle);
+            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+            int64_t waited_ms = (now_us - wait_begin_us) / 1000;
+
+            ESP_LOGW(TAG,
+                     "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
+                     level,
+                     (long long)waited_ms,
+                     (unsigned)rb_free,
+#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
+                     high_wm,
+                     low_wm
+#else
+                     -1,
+                     -1
+#endif
+            );
+            last_wait_log_us = now_us;
         }
 
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
@@ -114,13 +154,9 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
             if (!rb_wait_for_space(handle, -1)) {
                 return ESP_ERR_INVALID_STATE;
             }
+            continue;
         }
 #endif
-
-        if (xRingbufferSend(handle->ring_buffer, pkt188, 188, pdMS_TO_TICKS(20)) == pdTRUE) {
-            __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
-            return ESP_OK;
-        }
 
         // Ringbuffer momentanément saturé: céder puis réessayer (no-drop)
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -140,16 +176,6 @@ static esp_err_t rb_send_ts_backpressure_timed(app_hls_player_t *handle,
         *rb_wait_us += (esp_timer_get_time() - t0);
     }
     return err;
-}
-
-static bool hls_rb_wait_budget_exceeded(int64_t rb_wait_us)
-{
-    if (CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS <= 0) {
-        return false;
-    }
-
-    int64_t budget_us = (int64_t)CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS * 1000;
-    return rb_wait_us >= budget_us;
 }
 
 static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
@@ -366,7 +392,9 @@ static esp_http_client_handle_t hls_http_ts_client_get_or_create(app_hls_player_
 static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
                                                 esp_http_client_handle_t client,
                                                 const char *url,
-                                                bool *network_error)
+                                                bool *network_error,
+                                                uint8_t **segment_stage,
+                                                size_t *segment_stage_len)
 {
     if (network_error) {
         *network_error = false;
@@ -411,12 +439,50 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
     }
 
     int64_t body_t0 = esp_timer_get_time();
-    int64_t rb_wait_us = 0;
-    uint8_t buffer[HTTP_BUFFER_SIZE];
+    uint8_t *buffer = malloc(HTTP_BUFFER_SIZE);
+    size_t stage_len = 0;
+    size_t stage_capacity = 0;
+    uint8_t *stage = NULL;
+
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "Échec alloc buffer HTTP segment (%u bytes)", (unsigned)HTTP_BUFFER_SIZE);
+        esp_http_client_close(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (segment_stage == NULL || segment_stage_len == NULL) {
+        free(buffer);
+        esp_http_client_close(client);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (length > 0) {
+        size_t prealloc = (size_t)length;
+        if (prealloc < SEGMENT_STAGE_MIN_SIZE) {
+            prealloc = SEGMENT_STAGE_MIN_SIZE;
+        }
+        if (prealloc > SEGMENT_STAGE_MAX_SIZE) {
+            ESP_LOGE(TAG, "Segment trop grand pour staging prealloc: len=%d max=%u url=%s",
+                     length,
+                     (unsigned)SEGMENT_STAGE_MAX_SIZE,
+                     url ? url : "(null)");
+            free(buffer);
+            esp_http_client_close(client);
+            return ESP_ERR_NO_MEM;
+        }
+        stage = malloc(prealloc);
+        if (stage == NULL) {
+            ESP_LOGE(TAG, "Échec alloc staging segment prealloc (%u bytes)", (unsigned)prealloc);
+            free(buffer);
+            esp_http_client_close(client);
+            return ESP_ERR_NO_MEM;
+        }
+        stage_capacity = prealloc;
+    }
 
     while (true) {
         int64_t read_t0 = esp_timer_get_time();
-        int read = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+        int read = esp_http_client_read(client, (char *)buffer, HTTP_BUFFER_SIZE);
         int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
 
         handle->last_seg_metrics.read_calls++;
@@ -447,25 +513,73 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         }
 
         handle->last_seg_metrics.body_bytes += (size_t)read;
-        err = hls_process_ts_chunk(handle, buffer, (size_t)read, &rb_wait_us);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "TS push stopped: %s", esp_err_to_name(err));
-            break;
+
+        size_t wanted = stage_len + (size_t)read;
+        if (wanted > stage_capacity) {
+            size_t new_capacity = stage_capacity;
+            while (new_capacity < wanted) {
+                new_capacity += SEGMENT_STAGE_CHUNK_SIZE;
+            }
+            if (new_capacity > SEGMENT_STAGE_MAX_SIZE) {
+                ESP_LOGE(TAG, "Segment trop grand pour staging: %u bytes (max=%u) url=%s",
+                         (unsigned)wanted,
+                         (unsigned)SEGMENT_STAGE_MAX_SIZE,
+                         url ? url : "(null)");
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            uint8_t *new_stage = realloc(stage, new_capacity);
+            if (new_stage == NULL) {
+                ESP_LOGE(TAG, "Échec realloc staging segment (%u bytes)", (unsigned)new_capacity);
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            stage = new_stage;
+            stage_capacity = new_capacity;
         }
 
-        if (hls_rb_wait_budget_exceeded(rb_wait_us)) {
-            handle->last_seg_metrics.rb_budget_abort = true;
-            ESP_LOGW(TAG, "RB_BUDGET exceeded: rb_wait_ms=%lld budget_ms=%d url=%s",
-                     (long long)(rb_wait_us / 1000), CONFIG_APP_HLS_PLAYER_RB_WAIT_BUDGET_MS,
-                     url ? url : "(null)");
-            err = ESP_ERR_TIMEOUT;
-            break;
-        }
+        memcpy(stage + stage_len, buffer, (size_t)read);
+        stage_len += (size_t)read;
     }
 
     handle->last_seg_metrics.body_read_ms += (esp_timer_get_time() - body_t0) / 1000;
-    handle->last_seg_metrics.rb_wait_ms += rb_wait_us / 1000;
+    free(buffer);
     esp_http_client_close(client);
+
+    if (err != ESP_OK) {
+        free(stage);
+        return err;
+    }
+
+    *segment_stage = stage;
+    *segment_stage_len = stage_len;
+    return err;
+}
+
+static esp_err_t hls_http_commit_staged_segment(app_hls_player_t *handle,
+                                                const uint8_t *segment_stage,
+                                                size_t segment_stage_len)
+{
+    if (!handle || !segment_stage) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (handle->ts_carry_len != 0) {
+        ESP_LOGW(TAG, "SEGMENT_COMMIT carry_pending=%u before commit", (unsigned)handle->ts_carry_len);
+    }
+
+    int64_t rb_wait_us = 0;
+    esp_err_t err = hls_process_ts_chunk(handle, segment_stage, segment_stage_len, &rb_wait_us);
+    int64_t rb_wait_ms = rb_wait_us / 1000;
+    handle->last_seg_metrics.rb_wait_ms += rb_wait_ms;
+
+    if (rb_wait_ms >= COMMIT_WAIT_WARN_MS) {
+        ESP_LOGW(TAG, "COMMIT wait rb=%d%% waited_ms=%lld bytes=%u",
+                 hls_ringbuf_level_pct(handle),
+                 (long long)rb_wait_ms,
+                 (unsigned)segment_stage_len);
+    }
+
     return err;
 }
 
@@ -485,12 +599,15 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     handle->last_seg_metrics.reuse = reuse_hit;
 
     bool network_error = false;
-    esp_err_t err = hls_http_download_segment_once(handle, client, url, &network_error);
-    bool partial_segment_written = (handle->last_seg_metrics.body_bytes > 0) || (handle->ts_carry_len > 0);
-    if (err != ESP_OK && network_error && !partial_segment_written) {
+    uint8_t *segment_stage = NULL;
+    size_t segment_stage_len = 0;
+    esp_err_t err = hls_http_download_segment_once(handle, client, url, &network_error,
+                                                   &segment_stage, &segment_stage_len);
+    if (err != ESP_OK && network_error) {
         ESP_LOGW(TAG, "TS_CLIENT recreate reason=socket_err retry=1 err=%s", esp_err_to_name(err));
         handle->last_seg_metrics.retried = true;
         handle->last_seg_metrics.reuse = false;
+
         hls_http_ts_client_cleanup(handle);
 
         client = hls_http_ts_client_get_or_create(handle, url, NULL);
@@ -499,14 +616,26 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
             return err;
         }
 
-        err = hls_http_download_segment_once(handle, client, url, NULL);
-    } else if (err != ESP_OK && network_error && partial_segment_written) {
-        ESP_LOGW(TAG,
-                 "TS_CLIENT skip retry reason=partial_segment bytes=%u carry=%u err=%s",
-                 (unsigned)handle->last_seg_metrics.body_bytes,
-                 (unsigned)handle->ts_carry_len,
-                 esp_err_to_name(err));
+        // P1 fix: retry attempt must use fresh byte/timing counters.
+        // Otherwise attempt #1 body_bytes can mask an early EOF on attempt #2.
+        handle->last_seg_metrics.body_bytes = 0;
+        handle->last_seg_metrics.body_read_ms = 0;
+        handle->last_seg_metrics.rb_wait_ms = 0;
+        handle->last_seg_metrics.read_calls = 0;
+        handle->last_seg_metrics.max_read_block_ms = 0;
+
+        err = hls_http_download_segment_once(handle, client, url, NULL,
+                                             &segment_stage, &segment_stage_len);
     }
+
+    if (err == ESP_OK) {
+        err = hls_http_commit_staged_segment(handle, segment_stage, segment_stage_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "TS staged commit failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    free(segment_stage);
 
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;
