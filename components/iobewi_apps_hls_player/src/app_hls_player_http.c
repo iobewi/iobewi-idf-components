@@ -439,12 +439,19 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
     }
 
     int64_t body_t0 = esp_timer_get_time();
-    uint8_t buffer[HTTP_BUFFER_SIZE];
+    uint8_t *buffer = malloc(HTTP_BUFFER_SIZE);
     size_t stage_len = 0;
     size_t stage_capacity = 0;
     uint8_t *stage = NULL;
 
+    if (buffer == NULL) {
+        ESP_LOGE(TAG, "Échec alloc buffer HTTP segment (%u bytes)", (unsigned)HTTP_BUFFER_SIZE);
+        esp_http_client_close(client);
+        return ESP_ERR_NO_MEM;
+    }
+
     if (segment_stage == NULL || segment_stage_len == NULL) {
+        free(buffer);
         esp_http_client_close(client);
         return ESP_ERR_INVALID_ARG;
     }
@@ -459,12 +466,14 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
                      length,
                      (unsigned)SEGMENT_STAGE_MAX_SIZE,
                      url ? url : "(null)");
+            free(buffer);
             esp_http_client_close(client);
             return ESP_ERR_NO_MEM;
         }
         stage = malloc(prealloc);
         if (stage == NULL) {
             ESP_LOGE(TAG, "Échec alloc staging segment prealloc (%u bytes)", (unsigned)prealloc);
+            free(buffer);
             esp_http_client_close(client);
             return ESP_ERR_NO_MEM;
         }
@@ -473,7 +482,7 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
 
     while (true) {
         int64_t read_t0 = esp_timer_get_time();
-        int read = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+        int read = esp_http_client_read(client, (char *)buffer, HTTP_BUFFER_SIZE);
         int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
 
         handle->last_seg_metrics.read_calls++;
@@ -534,6 +543,7 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
     }
 
     handle->last_seg_metrics.body_read_ms += (esp_timer_get_time() - body_t0) / 1000;
+    free(buffer);
     esp_http_client_close(client);
 
     if (err != ESP_OK) {
