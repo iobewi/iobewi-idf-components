@@ -650,11 +650,15 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 
 char* hls_http_download_m3u8(const char *url)
 {
-    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) ESP_LOGI(TAG, "Téléchargement M3U8: %s", url);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Téléchargement M3U8: %s", url);
+    }
 
     size_t free_heap = esp_get_free_heap_size();
     size_t min_heap = esp_get_minimum_free_heap_size();
-    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) ESP_LOGI(TAG, "Heap avant M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Heap avant M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    }
 
     // FIX: Realloc progressif pour éviter overflow si chunked > 16KB
     // Allocation initiale 16KB, croissance par blocs de 16KB, max 64KB
@@ -835,12 +839,16 @@ char* hls_http_download_m3u8(const char *url)
         return NULL;
     }
 
-    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %zu)", offset, buffer_capacity);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %zu)", offset, buffer_capacity);
+    }
 
     // Log heap après pour tracker fragmentation
     free_heap = esp_get_free_heap_size();
     min_heap = esp_get_minimum_free_heap_size();
-    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) ESP_LOGI(TAG, "Heap après M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Heap après M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    }
 
     return buffer;
 }
