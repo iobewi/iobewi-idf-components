@@ -15,7 +15,7 @@
 #define CONFIG_APP_HLS_LOG_BURST_WINDOW_MS 10000
 #endif
 
-#define HLS_LOG_KEY_MAX 48
+#define HLS_LOG_SLOTS_MAX 48  // Number of tracked log patterns (keys), not key length
 
 typedef struct {
     const char *key;
@@ -25,13 +25,14 @@ typedef struct {
     int64_t burst_window_start_us;
 } hls_log_slot_t;
 
-static hls_log_slot_t s_slots[HLS_LOG_KEY_MAX];
+static hls_log_slot_t s_slots[HLS_LOG_SLOTS_MAX];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static hls_log_slot_t *hls_log_get_slot(const char *key)
 {
     hls_log_slot_t *free_slot = NULL;
-    for (int i = 0; i < HLS_LOG_KEY_MAX; i++) {
+    for (int i = 0; i < HLS_LOG_SLOTS_MAX; i++) {
+        // Pointer identity lookup: key must have static lifetime (string literal or static const char[]).
         if (s_slots[i].key == key) {
             return &s_slots[i];
         }

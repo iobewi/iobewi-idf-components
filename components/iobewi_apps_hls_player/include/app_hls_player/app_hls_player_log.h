@@ -18,6 +18,11 @@ typedef enum {
 hls_log_mode_t hls_log_get_mode(void);
 bool hls_log_mode_at_least(hls_log_mode_t mode);
 
+// IMPORTANT:
+// - key MUST be a stable pointer (string literal or static const char[])
+// - lookup uses pointer identity, not string content comparison
+// - passing temporary/dynamic strings will create ineffective throttling entries
+
 bool hls_log_throttle_time(const char *key, int64_t min_interval_ms);
 bool hls_log_throttle_every_n(const char *key, uint32_t n);
 bool hls_log_throttle_burst(const char *key, uint32_t burst_count, int64_t window_ms);
