@@ -104,12 +104,16 @@ static char *hls_http_download_m3u8_with_retry(const char *url)
 void hls_fetch_task(void *pvParameters)
 {
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
-    ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
+    if (hls_log_mode_at_least(HLS_LOG_MODE_RUN)) {
+        ESP_LOGI(TAG, "Démarrage de la task de téléchargement HLS");
+    }
 
     // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
+#if CONFIG_APP_HLS_PLAYER_STACK_DIAG
     UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
     ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes) [sizeof(StackType_t)=%u]",
              pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t), sizeof(StackType_t));
+#endif
 
     int64_t last_sequence_number = -1;
     int resync_cooldown = 0;  // Cycles en mode prudent après décrochage
@@ -230,7 +234,9 @@ void hls_fetch_task(void *pvParameters)
         // FIX #2: Gestion master playlist avec logique déterministe
         // Utilise maintenant variant_count au lieu de segment_count
         if (playlist.is_master_playlist && playlist.variant_count > 0) {
-            ESP_LOGI(TAG, "Master playlist détectée, sélection de la meilleure qualité...");
+            if (hls_log_mode_at_least(HLS_LOG_MODE_RUN)) {
+                ESP_LOGI(TAG, "Master playlist détectée, sélection de la meilleure qualité...");
+            }
 
             // Politique: hifi > midfi > lofi (par nom OU par bandwidth)
             int idx_selected = -1;
@@ -290,7 +296,10 @@ void hls_fetch_task(void *pvParameters)
             m3u8_content = hls_http_download_m3u8_with_retry(media_url);
             t1 = esp_timer_get_time();
             media_m3u8_ms = (t1 - t0) / 1000;
-            ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)media_m3u8_ms);
+            if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+                hls_log_throttle_time("media_refresh_ms", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+                ESP_LOGI(TAG, "[REFRESH] media m3u8 took %lld ms", (long long)media_m3u8_ms);
+            }
 
             if (m3u8_content == NULL) {
                 ESP_LOGE(TAG, "Échec de téléchargement de la media playlist");
@@ -395,7 +404,10 @@ void hls_fetch_task(void *pvParameters)
 
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
-            ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
+            if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
+                hls_log_throttle_burst("cold_start_segments", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
+                ESP_LOGI(TAG, "Cold start: téléchargement de %d segments initiaux (limite anti-overflow)", segments_per_cycle);
+            }
         }
 
         const int admission_high = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_HIGH;
@@ -730,14 +742,18 @@ task_exit:
     }
 
     handle->is_downloading = false;
-    ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
+    if (hls_log_mode_at_least(HLS_LOG_MODE_RUN)) {
+        ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
+    }
 
     // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
+#if CONFIG_APP_HLS_PLAYER_STACK_DIAG
     UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
     const size_t FETCH_STACK_SIZE = 11264;  // words (from xTaskCreate - P0.1 Phase 1)
     ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
              pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
              (FETCH_STACK_SIZE * sizeof(StackType_t)) - (hwm_final * sizeof(StackType_t)));
+#endif
 
     // Signaler fin de tâche via sémaphore
     if (handle->fetch_done) {
