@@ -65,8 +65,13 @@ static inline void hls_compute_cycle_other_ms(int64_t cycle_start_us,
 }
 static int hls_compute_live_edge_backoff(int rb_level_pct)
 {
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
     const int min_backoff = CONFIG_APP_HLS_LIVE_EDGE_BACKOFF_MIN;
     const int max_backoff = CONFIG_APP_HLS_LIVE_EDGE_BACKOFF_MAX;
+#else
+    const int min_backoff = 1;
+    const int max_backoff = 3;
+#endif
     int backoff;
 
     if (rb_level_pct <= 25) {
@@ -121,6 +126,14 @@ static int hls_compute_segments_per_cycle(size_t buffer_size,
                                           hls_catchup_state_t catchup_state,
                                           int rb_level_pct)
 {
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+    const int steady_max = CONFIG_APP_HLS_SEG_PER_CYCLE_STEADY_MAX;
+    const int catchup_max = CONFIG_APP_HLS_SEG_PER_CYCLE_CATCHUP_MAX;
+#else
+    const int steady_max = 2;
+    const int catchup_max = 2;
+#endif
+
     if (last_sequence_number < 0) {
         const int avg_segment_size = 130 * 1024;
         int max_initial = (int)((buffer_size * 80u / 100u) / avg_segment_size);
@@ -140,11 +153,11 @@ static int hls_compute_segments_per_cycle(size_t buffer_size,
         } else if (rb_level_pct <= 70) {
             catchup_spc = 2;
         }
-        return hls_clamp_int(catchup_spc, 1, CONFIG_APP_HLS_SEG_PER_CYCLE_CATCHUP_MAX);
+        return hls_clamp_int(catchup_spc, 1, catchup_max);
     }
 
     int steady_spc = (rb_level_pct > 70) ? 1 : 2;
-    return hls_clamp_int(steady_spc, 1, CONFIG_APP_HLS_SEG_PER_CYCLE_STEADY_MAX);
+    return hls_clamp_int(steady_spc, 1, steady_max);
 }
 
 static void hls_notify_audio_reset_if_needed(const app_hls_player_t *handle,
