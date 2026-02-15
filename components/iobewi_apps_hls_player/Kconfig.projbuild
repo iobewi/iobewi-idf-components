@@ -183,4 +183,65 @@ menu "HLS Player Configuration"
             Ringbuffer occupancy threshold (%) below which fetcher resumes TS
             downloads after an admission block.
 
+    config APP_HLS_LIVE_CATCHUP_ENABLE
+        bool "Enable live catch-up mode"
+        default y
+        help
+            Enable STEADY/CATCHUP state machine to reduce repeated live-window drops.
+
+    config APP_HLS_CATCHUP_ENTER_CONSECUTIVE
+        int "Catch-up enter consecutive detections"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 2
+        range 1 10
+
+    config APP_HLS_CATCHUP_EXIT_CONSECUTIVE
+        int "Catch-up exit consecutive confirmations"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 2
+        range 1 10
+
+    config APP_HLS_LIVE_EDGE_BACKOFF_MIN
+        int "Live-edge backoff min (segments)"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 1
+        range 0 10
+
+    config APP_HLS_LIVE_EDGE_BACKOFF_MAX
+        int "Live-edge backoff max (segments)"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 3
+        range 1 15
+
+    config APP_HLS_CATCHUP_SOFT_GAP
+        int "Soft catch-up gap threshold (segments)"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 2
+        range 1 20
+
+    config APP_HLS_CATCHUP_HARD_GAP
+        int "Hard catch-up gap threshold (segments)"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 4
+        range 1 40
+
+    config APP_HLS_CATCHUP_RESYNC_COOLDOWN_MS
+        int "Hard resync cooldown (ms)"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 8000
+        range 0 120000
+
+    config APP_HLS_SEG_PER_CYCLE_STEADY_MAX
+        int "Segments per cycle max in steady mode"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 2
+        range 1 8
+
+    config APP_HLS_SEG_PER_CYCLE_CATCHUP_MAX
+        int "Segments per cycle max in catch-up mode"
+        depends on APP_HLS_LIVE_CATCHUP_ENABLE
+        default 3
+        range 1 8
+
+
 endmenu
