@@ -174,6 +174,7 @@ menu "HLS Player Configuration"
         help
             Ringbuffer occupancy threshold (%) above which fetcher will not start
             a new TS segment download.
+            Ignored when APP_HLS_RB_GATING_ENABLE is enabled.
 
     config APP_HLS_PLAYER_TS_ADMISSION_LOW
         int "TS admission low threshold (%)"
@@ -182,6 +183,7 @@ menu "HLS Player Configuration"
         help
             Ringbuffer occupancy threshold (%) below which fetcher resumes TS
             downloads after an admission block.
+            Ignored when APP_HLS_RB_GATING_ENABLE is enabled.
 
     config APP_HLS_RB_GATING_ENABLE
         bool "Enable ringbuffer free-space gating for TS download"

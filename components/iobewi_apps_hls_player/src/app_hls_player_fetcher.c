@@ -197,6 +197,9 @@ static bool hls_ts_admission_should_block(app_hls_player_t *handle,
                                           bool *ts_admission_blocked,
                                           size_t rb_free)
 {
+    if (handle == NULL || ts_admission_blocked == NULL) {
+        return false;
+    }
 #if CONFIG_APP_HLS_RB_GATING_ENABLE
     size_t start_min_free = 0;
     size_t resume_min_free = 0;
