@@ -161,36 +161,19 @@ static int hls_compute_segments_per_cycle(size_t buffer_size,
 }
 
 
-static void hls_compute_ts_admission_thresholds(const app_hls_player_t *handle,
-                                               size_t *start_min_free,
-                                               size_t *resume_min_free)
+static size_t hls_get_ts_admission_start_min_free(const app_hls_player_t *handle)
 {
-    if (start_min_free == NULL || resume_min_free == NULL) {
-        return;
-    }
-
     if (handle == NULL || handle->buffer_size <= 188) {
-        *start_min_free = 0;
-        *resume_min_free = 0;
-        return;
+        return 0;
     }
 
     size_t cap = handle->buffer_size - 188;
     size_t start = CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES;
-    size_t resume = CONFIG_APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES;
-
     if (start > cap) {
         start = cap;
     }
-    if (resume > cap) {
-        resume = cap;
-    }
-    if (resume < start) {
-        resume = start;
-    }
 
-    *start_min_free = start;
-    *resume_min_free = resume;
+    return start;
 }
 
 static bool hls_ts_admission_should_block(app_hls_player_t *handle,
@@ -201,30 +184,25 @@ static bool hls_ts_admission_should_block(app_hls_player_t *handle,
         return false;
     }
 #if CONFIG_APP_HLS_RB_GATING_ENABLE
-    size_t start_min_free = 0;
-    size_t resume_min_free = 0;
-    hls_compute_ts_admission_thresholds(handle, &start_min_free, &resume_min_free);
+    size_t start_min_free = hls_get_ts_admission_start_min_free(handle);
 
-    if (*ts_admission_blocked && rb_free >= resume_min_free) {
+    if (*ts_admission_blocked && rb_free >= start_min_free) {
         *ts_admission_blocked = false;
         if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
             hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-            ESP_LOGI(TAG, "TS_ADMISSION resume free=%uB start=%uB resume=%uB",
+            ESP_LOGI(TAG, "TS_ADMISSION resume free=%uB start=%uB",
                      (unsigned)rb_free,
-                     (unsigned)start_min_free,
-                     (unsigned)resume_min_free);
+                     (unsigned)start_min_free);
         }
     }
 
-    if ((!*ts_admission_blocked && rb_free < start_min_free) ||
-        (*ts_admission_blocked && rb_free < resume_min_free)) {
+    if (rb_free < start_min_free) {
         const bool was_blocked = *ts_admission_blocked;
         *ts_admission_blocked = true;
         if (!was_blocked && hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-            ESP_LOGW(TAG, "TS_ADMISSION block free=%uB start=%uB resume=%uB",
+            ESP_LOGW(TAG, "TS_ADMISSION block free=%uB start=%uB",
                      (unsigned)rb_free,
-                     (unsigned)start_min_free,
-                     (unsigned)resume_min_free);
+                     (unsigned)start_min_free);
         }
         return true;
     }
