@@ -150,11 +150,15 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle,
 
         int64_t waited_ms = (now_us - wait_begin_us) / 1000;
 #if CONFIG_APP_HLS_RB_GATING_ENABLE
-        if (waited_ms >= CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS) {
-            if (send_wait_us != NULL) {
-                *send_wait_us += (esp_timer_get_time() - wait_begin_us);
-            }
-            return ESP_ERR_TIMEOUT;
+        if (waited_ms >= CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS &&
+            hls_log_throttle_time("rb_send_stall", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
+            hls_log_throttle_burst("rb_send_stall", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
+            ESP_LOGW(TAG,
+                     "RB_SEND_STALL waited_ms=%lld free=%u retries=%u warn_ms=%u",
+                     (long long)waited_ms,
+                     (unsigned)rb_free,
+                     (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                     (unsigned)CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS);
         }
 #endif
 
@@ -677,20 +681,6 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     }
 
     free(segment_stage);
-
-    if (err == ESP_ERR_TIMEOUT) {
-        if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-            hls_log_throttle_time("rb_send_timeout", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-            ESP_LOGW(TAG,
-                     "RB_SEND_TIMEOUT max_wait=%u ms free_min=%u retries=%u gate_wait_ms=%lld send_wait_ms=%lld",
-                     (unsigned)CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS,
-                     (unsigned)handle->last_seg_metrics.rb_free_min,
-                     (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
-                     (long long)handle->last_seg_metrics.rb_gating_wait_ms,
-                     (long long)handle->last_seg_metrics.rb_wait_ms);
-        }
-        hls_rate_limited_resync(handle);
-    }
 
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;

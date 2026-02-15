@@ -226,14 +226,15 @@ menu "HLS Player Configuration"
             Sleep interval while waiting for ringbuffer free-space.
 
     config APP_HLS_RB_SEND_MAX_WAIT_MS
-        int "Max wait in non-blocking ringbuffer send (ms)"
+        int "Warn threshold for non-blocking ringbuffer send wait (ms)"
         depends on APP_HLS_RB_GATING_ENABLE
         default 200
         range 1 5000
         help
-            Maximum cumulative wait allowed for retries in xRingbufferSend(..., 0)
-            while gating mode is enabled. Exceeding this limit returns timeout
-            instead of blocking for multi-second stalls.
+            Warning threshold for cumulative wait in xRingbufferSend(..., 0)
+            retry loops while gating mode is enabled.
+            Exceeding this limit emits a stall warning but does not abort
+            the segment transfer.
 
     config APP_HLS_LIVE_CATCHUP_ENABLE
         bool "Enable live catch-up mode"
