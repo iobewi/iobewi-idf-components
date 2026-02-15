@@ -174,6 +174,7 @@ menu "HLS Player Configuration"
         help
             Ringbuffer occupancy threshold (%) above which fetcher will not start
             a new TS segment download.
+            Ignored when APP_HLS_RB_GATING_ENABLE is enabled.
 
     config APP_HLS_PLAYER_TS_ADMISSION_LOW
         int "TS admission low threshold (%)"
@@ -182,6 +183,70 @@ menu "HLS Player Configuration"
         help
             Ringbuffer occupancy threshold (%) below which fetcher resumes TS
             downloads after an admission block.
+            Ignored when APP_HLS_RB_GATING_ENABLE is enabled.
+
+    config APP_HLS_RB_GATING_ENABLE
+        bool "Enable ringbuffer free-space gating for TS download"
+        default y
+        help
+            When enabled, the fetcher waits for enough ringbuffer free-space
+            before each HTTP read chunk. This avoids long blocking waits inside
+            xRingbufferSend() and naturally applies TCP/TLS backpressure.
+
+    config APP_HLS_RB_READ_CHUNK_BYTES
+        int "TS read chunk size (bytes)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 3760
+        range 188 16384
+        help
+            HTTP read chunk size used by gating mode.
+            A multiple of 188 bytes is recommended to reduce carry churn.
+
+    config APP_HLS_RB_MIN_FREE_BEFORE_READ_BYTES
+        int "Min ringbuffer free-space before HTTP read (bytes)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 11280
+        range 188 524288
+        help
+            Minimum free-space required before calling esp_http_client_read().
+            Recommended >= 2-3x read chunk size.
+
+    config APP_HLS_RB_START_TS_MIN_FREE_BYTES
+        int "Min ringbuffer free-space to start a TS segment (bytes)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 65536
+        range 188 1048576
+        help
+            Admission block threshold in bytes.
+
+    config APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES
+        int "Min ringbuffer free-space to resume TS segment start (bytes)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 81920
+        range 188 1048576
+        help
+            Admission resume threshold in bytes (hysteresis).
+            At runtime, resume is clamped to ringbuffer capacity and forced
+            to be >= start threshold.
+
+    config APP_HLS_RB_GATING_POLL_MS
+        int "Ringbuffer gating poll interval (ms)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 20
+        range 1 200
+        help
+            Sleep interval while waiting for ringbuffer free-space.
+
+    config APP_HLS_RB_SEND_MAX_WAIT_MS
+        int "Warn threshold for non-blocking ringbuffer send wait (ms)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 200
+        range 1 5000
+        help
+            Warning threshold for cumulative wait in xRingbufferSend(..., 0)
+            retry loops while gating mode is enabled.
+            Exceeding this limit emits a stall warning but does not abort
+            the segment transfer.
 
     config APP_HLS_LIVE_CATCHUP_ENABLE
         bool "Enable live catch-up mode"

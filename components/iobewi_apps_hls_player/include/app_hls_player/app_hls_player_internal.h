@@ -49,6 +49,28 @@ extern "C" {
 #ifndef CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW
     #define CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW 55
 #endif
+#ifndef CONFIG_APP_HLS_RB_GATING_ENABLE
+    // Bool Kconfig symbols may be omitted when set to "n"; default to 0 to preserve disabled behavior.
+    #define CONFIG_APP_HLS_RB_GATING_ENABLE 0
+#endif
+#ifndef CONFIG_APP_HLS_RB_READ_CHUNK_BYTES
+    #define CONFIG_APP_HLS_RB_READ_CHUNK_BYTES 3760
+#endif
+#ifndef CONFIG_APP_HLS_RB_MIN_FREE_BEFORE_READ_BYTES
+    #define CONFIG_APP_HLS_RB_MIN_FREE_BEFORE_READ_BYTES 11280
+#endif
+#ifndef CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES
+    #define CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES 65536
+#endif
+#ifndef CONFIG_APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES
+    #define CONFIG_APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES 81920
+#endif
+#ifndef CONFIG_APP_HLS_RB_GATING_POLL_MS
+    #define CONFIG_APP_HLS_RB_GATING_POLL_MS 20
+#endif
+#ifndef CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS
+    #define CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS 200
+#endif
 
 /**
  * @brief Structure interne du player HLS (définition complète)
@@ -89,8 +111,11 @@ struct app_hls_player_s {
         int64_t headers_ms;                 /**< Temps fetch_headers/status */
         int64_t body_read_ms;               /**< Temps lecture corps HTTP */
         int64_t rb_wait_ms;                 /**< Temps cumulé en attente ringbuffer */
+        int64_t rb_gating_wait_ms;          /**< Temps cumulé des attentes free-space gating */
         int64_t max_read_block_ms;          /**< Plus long blocage d'un read() */
         size_t body_bytes;                  /**< Bytes lus sur le corps HTTP */
+        size_t rb_free_min;                 /**< Minimum free-space observé pendant le segment */
+        uint32_t rb_send_fail_retries;      /**< Nombre de retries send non-bloquant */
         int read_calls;                     /**< Nombre d'appels esp_http_client_read() */
         bool reuse;                         /**< true si handle HTTP TS réutilisé */
         bool retried;                       /**< true si retry reconnect effectué */

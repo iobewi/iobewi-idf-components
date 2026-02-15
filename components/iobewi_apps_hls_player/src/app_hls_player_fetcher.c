@@ -160,6 +160,104 @@ static int hls_compute_segments_per_cycle(size_t buffer_size,
     return hls_clamp_int(steady_spc, 1, steady_max);
 }
 
+
+static void hls_compute_ts_admission_thresholds(const app_hls_player_t *handle,
+                                               size_t *start_min_free,
+                                               size_t *resume_min_free)
+{
+    if (start_min_free == NULL || resume_min_free == NULL) {
+        return;
+    }
+
+    if (handle == NULL || handle->buffer_size <= 188) {
+        *start_min_free = 0;
+        *resume_min_free = 0;
+        return;
+    }
+
+    size_t cap = handle->buffer_size - 188;
+    size_t start = CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES;
+    size_t resume = CONFIG_APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES;
+
+    if (start > cap) {
+        start = cap;
+    }
+    if (resume > cap) {
+        resume = cap;
+    }
+    if (resume < start) {
+        resume = start;
+    }
+
+    *start_min_free = start;
+    *resume_min_free = resume;
+}
+
+static bool hls_ts_admission_should_block(app_hls_player_t *handle,
+                                          bool *ts_admission_blocked,
+                                          size_t rb_free)
+{
+    if (handle == NULL || ts_admission_blocked == NULL) {
+        return false;
+    }
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+    size_t start_min_free = 0;
+    size_t resume_min_free = 0;
+    hls_compute_ts_admission_thresholds(handle, &start_min_free, &resume_min_free);
+
+    if (*ts_admission_blocked && rb_free >= resume_min_free) {
+        *ts_admission_blocked = false;
+        if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+            hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+            ESP_LOGI(TAG, "TS_ADMISSION resume free=%uB start=%uB resume=%uB",
+                     (unsigned)rb_free,
+                     (unsigned)start_min_free,
+                     (unsigned)resume_min_free);
+        }
+    }
+
+    if ((!*ts_admission_blocked && rb_free < start_min_free) ||
+        (*ts_admission_blocked && rb_free < resume_min_free)) {
+        const bool was_blocked = *ts_admission_blocked;
+        *ts_admission_blocked = true;
+        if (!was_blocked && hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+            ESP_LOGW(TAG, "TS_ADMISSION block free=%uB start=%uB resume=%uB",
+                     (unsigned)rb_free,
+                     (unsigned)start_min_free,
+                     (unsigned)resume_min_free);
+        }
+        return true;
+    }
+
+    return false;
+#else
+    size_t rb_filled = handle->buffer_size - rb_free;
+    int level = (rb_filled * 100) / handle->buffer_size;
+    const int admission_high = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_HIGH;
+    const int admission_low = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW;
+
+    if (*ts_admission_blocked && level <= admission_low) {
+        *ts_admission_blocked = false;
+        if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+            hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+            ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", level, admission_high, admission_low);
+        }
+    }
+
+    if ((!*ts_admission_blocked && level >= admission_high) ||
+        (*ts_admission_blocked && level > admission_low)) {
+        const bool was_blocked = *ts_admission_blocked;
+        *ts_admission_blocked = true;
+        if (!was_blocked && hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+            ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", level, admission_high, admission_low);
+        }
+        return true;
+    }
+
+    return false;
+#endif
+}
+
 static void hls_notify_audio_reset_if_needed(const app_hls_player_t *handle,
                                              uint32_t *resets_audio_count,
                                              const char *reason)
@@ -513,31 +611,13 @@ void hls_fetch_task(void *pvParameters)
             }
         }
 
-        const int admission_high = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_HIGH;
-        const int admission_low = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW;
-
-        if (ts_admission_blocked && level <= admission_low) {
-            ts_admission_blocked = false;
-            if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-                ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", level, admission_high, admission_low);
-            }
-        }
-
-        if ((!ts_admission_blocked && level >= admission_high) ||
-            (ts_admission_blocked && level > admission_low)) {
-            const bool was_blocked = ts_admission_blocked;
-            ts_admission_blocked = true;
-            if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
-                if (!was_blocked) {
-                    catchup_admission_block_cycles++;
-                }
-            }
-            if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-                ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", level, admission_high, admission_low);
+        bool was_blocked_cycle = ts_admission_blocked;
+        if (hls_ts_admission_should_block(handle, &ts_admission_blocked, free_size)) {
+            if (catchup_state == HLS_CATCHUP_STATE_CATCHUP && !was_blocked_cycle) {
+                catchup_admission_block_cycles++;
             }
             handle->is_downloading = false;
-            if (!hls_interruptible_delay_ms(100)) {
+            if (!hls_interruptible_delay_ms(CONFIG_APP_HLS_RB_GATING_POLL_MS)) {
                 goto task_exit;
             }
             continue;
@@ -662,31 +742,15 @@ void hls_fetch_task(void *pvParameters)
             // Admission control au niveau segment: ne jamais démarrer un TS quand RB est haut.
             while (true) {
                 size_t seg_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t seg_filled = handle->buffer_size - seg_free;
-                int seg_level = (seg_filled * 100) / handle->buffer_size;
-
-                if (ts_admission_blocked && seg_level <= admission_low) {
-                    ts_admission_blocked = false;
-                    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
-                        hls_log_throttle_time("ts_admission_resume", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-                        ESP_LOGI(TAG, "TS_ADMISSION resume rb=%d%% high=%d low=%d action=download", seg_level, admission_high, admission_low);
-                    }
-                }
-
-                if ((!ts_admission_blocked && seg_level >= admission_high) ||
-                    (ts_admission_blocked && seg_level > admission_low)) {
-                    const bool was_blocked = ts_admission_blocked;
-                    ts_admission_blocked = true;
+                bool was_blocked = ts_admission_blocked;
+                if (hls_ts_admission_should_block(handle, &ts_admission_blocked, seg_free)) {
                     if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
                         if (!was_blocked) {
                             catchup_admission_block_cycles++;
                         }
                         catchup_admission_block_segment_waits++;
                     }
-                    if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-                        ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", seg_level, admission_high, admission_low);
-                    }
-                    if (!hls_interruptible_delay_ms(100)) {
+                    if (!hls_interruptible_delay_ms(CONFIG_APP_HLS_RB_GATING_POLL_MS)) {
                         goto task_exit;
                     }
                     continue;
@@ -731,7 +795,7 @@ void hls_fetch_task(void *pvParameters)
 
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
                 hls_log_throttle_every_n("segment_metrics", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
-                ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
+                ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld gate_wait_ms=%lld rb_retry=%u rb_free_min=%u retry=%d",
                          (long long)seg->sequence,
                          handle->last_seg_metrics.reuse ? 1 : 0,
                          (long long)handle->last_seg_metrics.open_ms,
@@ -741,6 +805,9 @@ void hls_fetch_task(void *pvParameters)
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          kbps,
                          (long long)handle->last_seg_metrics.rb_wait_ms,
+                         (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                         (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                         (unsigned)handle->last_seg_metrics.rb_free_min,
                          handle->last_seg_metrics.retried ? 1 : 0);
             }
 
@@ -763,27 +830,39 @@ void hls_fetch_task(void *pvParameters)
                 if (seg_ms >= warn_ts_ms) {
                     if (hls_log_throttle_time("ts_slow", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
                         hls_log_throttle_burst("ts_slow", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
-                        ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d)",
+                        ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld gate_wait=%lld rb_retry=%u rb_free_min=%u read_max=%lld bytes=%u reads=%d)",
                                  (long long)seg->sequence, (long long)seg_ms, warn_ts_ms,
                                  (long long)handle->last_seg_metrics.open_ms,
                                  (long long)handle->last_seg_metrics.headers_ms,
                                  (long long)handle->last_seg_metrics.body_read_ms,
                                  (long long)handle->last_seg_metrics.rb_wait_ms,
+                                 (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                                 (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                                 (unsigned)handle->last_seg_metrics.rb_free_min,
                                  (long long)handle->last_seg_metrics.max_read_block_ms,
                                  (unsigned)handle->last_seg_metrics.body_bytes,
                                  handle->last_seg_metrics.read_calls);
+                    }
+                    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+                        ESP_LOGI(TAG, "TS_GATING wait_ms=%lld retries=%u free_min=%u",
+                                 (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                                 (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                                 (unsigned)handle->last_seg_metrics.rb_free_min);
                     }
                 } else {
                     ESP_LOGD(TAG, "Segment %lld OK [TS took=%lld ms]",
                              (long long)seg->sequence, (long long)seg_ms);
                 }
             } else {
-                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d]",
+                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms, open=%lld hdr=%lld body=%lld rb_wait=%lld gate_wait=%lld rb_retry=%u rb_free_min=%u read_max=%lld bytes=%u reads=%d]",
                          (long long)seg->sequence, (long long)seg_ms,
                          (long long)handle->last_seg_metrics.open_ms,
                          (long long)handle->last_seg_metrics.headers_ms,
                          (long long)handle->last_seg_metrics.body_read_ms,
                          (long long)handle->last_seg_metrics.rb_wait_ms,
+                         (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                         (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                         (unsigned)handle->last_seg_metrics.rb_free_min,
                          (long long)handle->last_seg_metrics.max_read_block_ms,
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          handle->last_seg_metrics.read_calls);
