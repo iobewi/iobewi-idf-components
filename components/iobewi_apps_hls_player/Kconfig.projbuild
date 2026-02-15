@@ -194,7 +194,7 @@ menu "HLS Player Configuration"
     config APP_HLS_RB_READ_CHUNK_BYTES
         int "TS read chunk size (bytes)"
         depends on APP_HLS_RB_GATING_ENABLE
-        default 4096
+        default 3760
         range 188 16384
         help
             HTTP read chunk size used by gating mode.
@@ -203,7 +203,7 @@ menu "HLS Player Configuration"
     config APP_HLS_RB_MIN_FREE_BEFORE_READ_BYTES
         int "Min ringbuffer free-space before HTTP read (bytes)"
         depends on APP_HLS_RB_GATING_ENABLE
-        default 12288
+        default 11280
         range 188 524288
         help
             Minimum free-space required before calling esp_http_client_read().

@@ -160,6 +160,30 @@ static int hls_compute_segments_per_cycle(size_t buffer_size,
     return hls_clamp_int(steady_spc, 1, steady_max);
 }
 
+
+static size_t hls_compute_start_min_free_bytes(const app_hls_player_t *handle)
+{
+    if (handle == NULL || handle->buffer_size <= 188) {
+        return 0;
+    }
+
+    size_t by_chunk = (size_t)CONFIG_APP_HLS_RB_READ_CHUNK_BYTES * 3u;
+    size_t by_ratio = handle->buffer_size / 8u;
+    size_t dynamic_floor = (by_chunk > by_ratio) ? by_chunk : by_ratio;
+
+    size_t start_min_free = CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES;
+    if (start_min_free < dynamic_floor) {
+        start_min_free = dynamic_floor;
+    }
+
+    size_t start_cap = handle->buffer_size - 188;
+    if (start_min_free > start_cap) {
+        start_min_free = start_cap;
+    }
+
+    return start_min_free;
+}
+
 static void hls_notify_audio_reset_if_needed(const app_hls_player_t *handle,
                                              uint32_t *resets_audio_count,
                                              const char *reason)
@@ -676,15 +700,7 @@ void hls_fetch_task(void *pvParameters)
                 bool blocked_on_percent = ((!ts_admission_blocked && seg_level >= admission_high) ||
                                            (ts_admission_blocked && seg_level > admission_low));
 #if CONFIG_APP_HLS_RB_GATING_ENABLE
-                size_t start_min_free = CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES;
-                if (handle->buffer_size > 188) {
-                    size_t start_cap = handle->buffer_size - 188;
-                    if (start_min_free > start_cap) {
-                        start_min_free = start_cap;
-                    }
-                } else {
-                    start_min_free = 0;
-                }
+                size_t start_min_free = hls_compute_start_min_free_bytes(handle);
                 bool blocked_on_start_free = (seg_free < start_min_free);
 #else
                 size_t start_min_free = 0;
