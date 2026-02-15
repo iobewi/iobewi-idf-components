@@ -65,49 +65,61 @@ static int hls_ringbuf_level_pct(app_hls_player_t *handle)
     return (int)((rb_used * 100u) / handle->buffer_size);
 }
 
-static bool rb_wait_for_space(app_hls_player_t *handle, int timeout_ms)
+static void hls_metrics_update_free_min(app_hls_player_t *handle, size_t rb_free)
 {
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-    const int low_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW;
-#else
-    (void)timeout_ms;
-    (void)handle;
-    return true;
-#endif
+    if (handle->last_seg_metrics.rb_free_min == 0 || rb_free < handle->last_seg_metrics.rb_free_min) {
+        handle->last_seg_metrics.rb_free_min = rb_free;
+    }
+}
 
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-    int64_t t0_us = esp_timer_get_time();
+static size_t hls_rb_clamp_min_free(const app_hls_player_t *handle, size_t configured_min)
+{
+    if (handle == NULL || handle->buffer_size <= 188) {
+        return 0;
+    }
+
+    size_t max_safe = handle->buffer_size - 188;
+    return (configured_min > max_safe) ? max_safe : configured_min;
+}
+
+static bool hls_rb_wait_free_bytes(app_hls_player_t *handle,
+                                   size_t min_free_bytes,
+                                   uint32_t poll_ms,
+                                   int64_t *wait_acc_us)
+{
+    if (handle == NULL || handle->ring_buffer == NULL) {
+        return false;
+    }
+
+    const size_t clamped_min = hls_rb_clamp_min_free(handle, min_free_bytes);
+    int64_t wait_t0 = esp_timer_get_time();
     while (true) {
         if (!handle->is_downloading) {
             return false;
         }
 
-        if (hls_ringbuf_level_pct(handle) <= low_wm) {
+        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+        hls_metrics_update_free_min(handle, rb_free);
+        if (rb_free >= clamped_min) {
+            if (wait_acc_us) {
+                *wait_acc_us += (esp_timer_get_time() - wait_t0);
+            }
             return true;
         }
 
-        if (timeout_ms >= 0) {
-            int64_t elapsed_ms = (esp_timer_get_time() - t0_us) / 1000;
-            if (elapsed_ms >= timeout_ms) {
-                return false;
-            }
+        if (!hls_interruptible_delay_ms(poll_ms)) {
+            return false;
         }
-
-        vTaskDelay(pdMS_TO_TICKS(2));
     }
-#endif
 }
 
-static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t *pkt188)
+static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle,
+                                         const uint8_t *pkt188,
+                                         int64_t *send_wait_us)
 {
     if (handle == NULL || handle->ring_buffer == NULL || pkt188 == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-    const int high_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_HIGH;
-    const int low_wm = CONFIG_APP_HLS_PLAYER_BACKPRESSURE_LOW;
-#endif
 
     int64_t wait_begin_us = 0;
     int64_t last_wait_log_us = 0;
@@ -119,8 +131,13 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
 
         if (xRingbufferSend(handle->ring_buffer, pkt188, 188, 0) == pdTRUE) {
             __atomic_fetch_add(&handle->bytes_downloaded, 188, __ATOMIC_RELAXED);
+            if (send_wait_us != NULL && wait_begin_us != 0) {
+                *send_wait_us += (esp_timer_get_time() - wait_begin_us);
+            }
             return ESP_OK;
         }
+
+        handle->last_seg_metrics.rb_send_fail_retries++;
 
         int64_t now_us = esp_timer_get_time();
         if (wait_begin_us == 0) {
@@ -128,63 +145,42 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
             last_wait_log_us = now_us;
         }
 
-        if ((now_us - last_wait_log_us) >= (250 * 1000)) {
-            int level = hls_ringbuf_level_pct(handle);
-            size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-            int64_t waited_ms = (now_us - wait_begin_us) / 1000;
+        size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+        hls_metrics_update_free_min(handle, rb_free);
 
-            if (hls_log_throttle_time("rb_send_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
-                hls_log_throttle_burst("rb_send_wait", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
-                ESP_LOGW(TAG,
-                         "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
-                         level,
-                         (long long)waited_ms,
-                         (unsigned)rb_free,
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-                         high_wm,
-                         low_wm
-#else
-                         -1,
-                         -1
-#endif
-                );
+        int64_t waited_ms = (now_us - wait_begin_us) / 1000;
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+        if (waited_ms >= CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS) {
+            if (send_wait_us != NULL) {
+                *send_wait_us += (esp_timer_get_time() - wait_begin_us);
             }
+            return ESP_ERR_TIMEOUT;
+        }
+#endif
+
+        if ((now_us - last_wait_log_us) >= (250 * 1000) &&
+            hls_log_throttle_time("rb_send_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
+            hls_log_throttle_burst("rb_send_wait", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
+            int level = hls_ringbuf_level_pct(handle);
+            ESP_LOGW(TAG, "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 retries=%u max_wait=%u",
+                     level,
+                     (long long)waited_ms,
+                     (unsigned)rb_free,
+                     (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                     (unsigned)CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS);
             last_wait_log_us = now_us;
         }
 
-#if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-        if (hls_ringbuf_level_pct(handle) >= high_wm) {
-            if (!rb_wait_for_space(handle, -1)) {
-                return ESP_ERR_INVALID_STATE;
-            }
-            continue;
+        if (!hls_interruptible_delay_ms(CONFIG_APP_HLS_RB_GATING_POLL_MS)) {
+            return ESP_ERR_INVALID_STATE;
         }
-#endif
-
-        // Ringbuffer momentanément saturé: céder puis réessayer (no-drop)
-        vTaskDelay(pdMS_TO_TICKS(2));
     }
-}
-
-/**
- * @brief Envoi TS avec mesure du temps passé en backpressure
- */
-static esp_err_t rb_send_ts_backpressure_timed(app_hls_player_t *handle,
-                                               const uint8_t *pkt188,
-                                               int64_t *rb_wait_us)
-{
-    int64_t t0 = esp_timer_get_time();
-    esp_err_t err = rb_send_ts_backpressure(handle, pkt188);
-    if (rb_wait_us != NULL) {
-        *rb_wait_us += (esp_timer_get_time() - t0);
-    }
-    return err;
 }
 
 static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
                                       const uint8_t *src,
                                       size_t src_len,
-                                      int64_t *rb_wait_us)
+                                      int64_t *send_wait_us)
 {
     if (handle == NULL || src == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -200,7 +196,7 @@ static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
         src_len -= take;
 
         if (handle->ts_carry_len == 188) {
-            esp_err_t err = rb_send_ts_backpressure_timed(handle, handle->ts_carry, rb_wait_us);
+            esp_err_t err = rb_send_ts_backpressure(handle, handle->ts_carry, send_wait_us);
             if (err != ESP_OK) {
                 return err;
             }
@@ -209,7 +205,7 @@ static esp_err_t hls_process_ts_chunk(app_hls_player_t *handle,
     }
 
     while (src_len >= 188) {
-        esp_err_t err = rb_send_ts_backpressure_timed(handle, src, rb_wait_us);
+        esp_err_t err = rb_send_ts_backpressure(handle, src, send_wait_us);
         if (err != ESP_OK) {
             return err;
         }
@@ -441,14 +437,23 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         return ESP_FAIL;
     }
 
+    const size_t read_chunk = (CONFIG_APP_HLS_RB_READ_CHUNK_BYTES <= HTTP_BUFFER_SIZE)
+                                ? CONFIG_APP_HLS_RB_READ_CHUNK_BYTES
+                                : HTTP_BUFFER_SIZE;
     int64_t body_t0 = esp_timer_get_time();
-    uint8_t *buffer = malloc(HTTP_BUFFER_SIZE);
+    uint8_t *buffer = malloc(read_chunk);
     size_t stage_len = 0;
     size_t stage_capacity = 0;
     uint8_t *stage = NULL;
+    int64_t gating_wait_us = 0;
+    int64_t send_wait_us = 0;
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+    (void)stage_len;
+    (void)stage_capacity;
+#endif
 
     if (buffer == NULL) {
-        ESP_LOGE(TAG, "Échec alloc buffer HTTP segment (%u bytes)", (unsigned)HTTP_BUFFER_SIZE);
+        ESP_LOGE(TAG, "Échec alloc buffer HTTP segment (%u bytes)", (unsigned)read_chunk);
         esp_http_client_close(client);
         return ESP_ERR_NO_MEM;
     }
@@ -459,6 +464,7 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         return ESP_ERR_INVALID_ARG;
     }
 
+#if !CONFIG_APP_HLS_RB_GATING_ENABLE
     if (length > 0) {
         size_t prealloc = (size_t)length;
         if (prealloc < SEGMENT_STAGE_MIN_SIZE) {
@@ -482,10 +488,20 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         }
         stage_capacity = prealloc;
     }
+#endif
 
     while (true) {
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+        if (!hls_rb_wait_free_bytes(handle,
+                                    CONFIG_APP_HLS_RB_MIN_FREE_BEFORE_READ_BYTES,
+                                    CONFIG_APP_HLS_RB_GATING_POLL_MS,
+                                    &gating_wait_us)) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
+#endif
         int64_t read_t0 = esp_timer_get_time();
-        int read = esp_http_client_read(client, (char *)buffer, HTTP_BUFFER_SIZE);
+        int read = esp_http_client_read(client, (char *)buffer, read_chunk);
         int64_t read_block_ms = (esp_timer_get_time() - read_t0) / 1000;
 
         handle->last_seg_metrics.read_calls++;
@@ -517,6 +533,12 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
 
         handle->last_seg_metrics.body_bytes += (size_t)read;
 
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+        err = hls_process_ts_chunk(handle, buffer, (size_t)read, &send_wait_us);
+        if (err != ESP_OK) {
+            break;
+        }
+#else
         size_t wanted = stage_len + (size_t)read;
         if (wanted > stage_capacity) {
             size_t new_capacity = stage_capacity;
@@ -543,9 +565,12 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
 
         memcpy(stage + stage_len, buffer, (size_t)read);
         stage_len += (size_t)read;
+#endif
     }
 
     handle->last_seg_metrics.body_read_ms += (esp_timer_get_time() - body_t0) / 1000;
+    handle->last_seg_metrics.rb_wait_ms += send_wait_us / 1000;
+    handle->last_seg_metrics.rb_gating_wait_ms += gating_wait_us / 1000;
     free(buffer);
     esp_http_client_close(client);
 
@@ -554,8 +579,13 @@ static esp_err_t hls_http_download_segment_once(app_hls_player_t *handle,
         return err;
     }
 
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+    *segment_stage = NULL;
+    *segment_stage_len = 0;
+#else
     *segment_stage = stage;
     *segment_stage_len = stage_len;
+#endif
     return err;
 }
 
@@ -592,6 +622,7 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 {
     int64_t seg_t0 = esp_timer_get_time();
     memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
+    handle->last_seg_metrics.rb_free_min = handle->buffer_size;
 
     if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
         ESP_LOGI(TAG, "Téléchargement: %s", url);
@@ -630,12 +661,15 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         handle->last_seg_metrics.rb_wait_ms = 0;
         handle->last_seg_metrics.read_calls = 0;
         handle->last_seg_metrics.max_read_block_ms = 0;
+        handle->last_seg_metrics.rb_send_fail_retries = 0;
+        handle->last_seg_metrics.rb_gating_wait_ms = 0;
+        handle->last_seg_metrics.rb_free_min = handle->buffer_size;
 
         err = hls_http_download_segment_once(handle, client, url, NULL,
                                              &segment_stage, &segment_stage_len);
     }
 
-    if (err == ESP_OK) {
+    if (err == ESP_OK && segment_stage_len > 0) {
         err = hls_http_commit_staged_segment(handle, segment_stage, segment_stage_len);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "TS staged commit failed: %s", esp_err_to_name(err));
@@ -643,6 +677,20 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     }
 
     free(segment_stage);
+
+    if (err == ESP_ERR_TIMEOUT) {
+        if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+            hls_log_throttle_time("rb_send_timeout", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
+            ESP_LOGW(TAG,
+                     "RB_SEND_TIMEOUT max_wait=%u ms free_min=%u retries=%u gate_wait_ms=%lld send_wait_ms=%lld",
+                     (unsigned)CONFIG_APP_HLS_RB_SEND_MAX_WAIT_MS,
+                     (unsigned)handle->last_seg_metrics.rb_free_min,
+                     (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                     (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                     (long long)handle->last_seg_metrics.rb_wait_ms);
+        }
+        hls_rate_limited_resync(handle);
+    }
 
     handle->last_seg_metrics.total_ms = (esp_timer_get_time() - seg_t0) / 1000;
     return err;

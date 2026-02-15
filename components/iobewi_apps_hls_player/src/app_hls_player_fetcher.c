@@ -673,8 +673,24 @@ void hls_fetch_task(void *pvParameters)
                     }
                 }
 
-                if ((!ts_admission_blocked && seg_level >= admission_high) ||
-                    (ts_admission_blocked && seg_level > admission_low)) {
+                bool blocked_on_percent = ((!ts_admission_blocked && seg_level >= admission_high) ||
+                                           (ts_admission_blocked && seg_level > admission_low));
+#if CONFIG_APP_HLS_RB_GATING_ENABLE
+                size_t start_min_free = CONFIG_APP_HLS_RB_START_TS_MIN_FREE_BYTES;
+                if (handle->buffer_size > 188) {
+                    size_t start_cap = handle->buffer_size - 188;
+                    if (start_min_free > start_cap) {
+                        start_min_free = start_cap;
+                    }
+                } else {
+                    start_min_free = 0;
+                }
+                bool blocked_on_start_free = (seg_free < start_min_free);
+#else
+                size_t start_min_free = 0;
+                bool blocked_on_start_free = false;
+#endif
+                if (blocked_on_percent || blocked_on_start_free) {
                     const bool was_blocked = ts_admission_blocked;
                     ts_admission_blocked = true;
                     if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
@@ -684,9 +700,14 @@ void hls_fetch_task(void *pvParameters)
                         catchup_admission_block_segment_waits++;
                     }
                     if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
-                        ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", seg_level, admission_high, admission_low);
+                        ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% free=%uB high=%d low=%d start_min=%uB action=wait",
+                                 seg_level,
+                                 (unsigned)seg_free,
+                                 admission_high,
+                                 admission_low,
+                                 (unsigned)start_min_free);
                     }
-                    if (!hls_interruptible_delay_ms(100)) {
+                    if (!hls_interruptible_delay_ms(CONFIG_APP_HLS_RB_GATING_POLL_MS)) {
                         goto task_exit;
                     }
                     continue;
@@ -731,7 +752,7 @@ void hls_fetch_task(void *pvParameters)
 
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
                 hls_log_throttle_every_n("segment_metrics", CONFIG_APP_HLS_LOG_SAMPLE_N_FAST)) {
-                ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld retry=%d",
+                ESP_LOGI(TAG, "SEG seq=%lld reuse=%d open_ms=%lld headers_ms=%lld body_read_ms=%lld max_read_block_ms=%lld bytes=%u kbps=%u rb_wait_ms=%lld gate_wait_ms=%lld rb_retry=%u rb_free_min=%u retry=%d",
                          (long long)seg->sequence,
                          handle->last_seg_metrics.reuse ? 1 : 0,
                          (long long)handle->last_seg_metrics.open_ms,
@@ -741,6 +762,9 @@ void hls_fetch_task(void *pvParameters)
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          kbps,
                          (long long)handle->last_seg_metrics.rb_wait_ms,
+                         (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                         (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                         (unsigned)handle->last_seg_metrics.rb_free_min,
                          handle->last_seg_metrics.retried ? 1 : 0);
             }
 
@@ -763,27 +787,39 @@ void hls_fetch_task(void *pvParameters)
                 if (seg_ms >= warn_ts_ms) {
                     if (hls_log_throttle_time("ts_slow", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
                         hls_log_throttle_burst("ts_slow", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
-                        ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d)",
+                        ESP_LOGW(TAG, "[TS SLOW] seq=%lld took=%lld ms (warn=%d ms, open=%lld hdr=%lld body=%lld rb_wait=%lld gate_wait=%lld rb_retry=%u rb_free_min=%u read_max=%lld bytes=%u reads=%d)",
                                  (long long)seg->sequence, (long long)seg_ms, warn_ts_ms,
                                  (long long)handle->last_seg_metrics.open_ms,
                                  (long long)handle->last_seg_metrics.headers_ms,
                                  (long long)handle->last_seg_metrics.body_read_ms,
                                  (long long)handle->last_seg_metrics.rb_wait_ms,
+                                 (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                                 (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                                 (unsigned)handle->last_seg_metrics.rb_free_min,
                                  (long long)handle->last_seg_metrics.max_read_block_ms,
                                  (unsigned)handle->last_seg_metrics.body_bytes,
                                  handle->last_seg_metrics.read_calls);
+                    }
+                    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+                        ESP_LOGI(TAG, "TS_GATING wait_ms=%lld retries=%u free_min=%u",
+                                 (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                                 (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                                 (unsigned)handle->last_seg_metrics.rb_free_min);
                     }
                 } else {
                     ESP_LOGD(TAG, "Segment %lld OK [TS took=%lld ms]",
                              (long long)seg->sequence, (long long)seg_ms);
                 }
             } else {
-                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms, open=%lld hdr=%lld body=%lld rb_wait=%lld read_max=%lld bytes=%u reads=%d]",
+                ESP_LOGE(TAG, "Échec téléchargement segment %lld [TS took=%lld ms, open=%lld hdr=%lld body=%lld rb_wait=%lld gate_wait=%lld rb_retry=%u rb_free_min=%u read_max=%lld bytes=%u reads=%d]",
                          (long long)seg->sequence, (long long)seg_ms,
                          (long long)handle->last_seg_metrics.open_ms,
                          (long long)handle->last_seg_metrics.headers_ms,
                          (long long)handle->last_seg_metrics.body_read_ms,
                          (long long)handle->last_seg_metrics.rb_wait_ms,
+                         (long long)handle->last_seg_metrics.rb_gating_wait_ms,
+                         (unsigned)handle->last_seg_metrics.rb_send_fail_retries,
+                         (unsigned)handle->last_seg_metrics.rb_free_min,
                          (long long)handle->last_seg_metrics.max_read_block_ms,
                          (unsigned)handle->last_seg_metrics.body_bytes,
                          handle->last_seg_metrics.read_calls);
