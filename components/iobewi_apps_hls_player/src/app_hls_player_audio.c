@@ -67,10 +67,7 @@ void hls_audio_play_task(void *pvParameters)
     app_hls_player_t *handle = (app_hls_player_t *)pvParameters;
     ESP_LOGI(TAG, "Démarrage de la task de lecture audio");
 
-    // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
-    UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
-    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes) [sizeof(StackType_t)=%u]",
-             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t), sizeof(StackType_t));
+    hls_stack_log_initial(TAG);
 
     // Créer le décodeur TS
     esp_audio_simple_dec_handle_t dec_handle = NULL;
@@ -164,9 +161,7 @@ void hls_audio_play_task(void *pvParameters)
             break;
         }
 
-        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
-        size_t filled_size = handle->buffer_size - free_size;
-        current_level = (filled_size * 100) / handle->buffer_size;
+        current_level = hls_rb_get_level_pct(handle);
 
         if (current_level >= TARGET_PREBUFFER) {
             ESP_LOGI(TAG, "Prébuffer atteint: %d%% - démarrage lecture", current_level);
@@ -193,17 +188,8 @@ void hls_audio_play_task(void *pvParameters)
 
     while (true) {
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
-        // [P0.1] Log HWM périodique toutes les 5s (debug only)
-        // HWM = free min (marge restante), pas usage
-        // Usage peak = S_allocated - HWM
         static int64_t last_log_us = 0;
-        int64_t now = esp_timer_get_time();
-        if (now - last_log_us > 5 * 1000 * 1000) {
-            last_log_us = now;
-            UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGD(TAG, "[STACK] HWM=%u words (%u bytes free min) [audio_play]",
-                     (unsigned)hwm, (unsigned)(hwm * sizeof(StackType_t)));
-        }
+        hls_stack_log_periodic(TAG, "audio_play", &last_log_us, 5 * 1000 * 1000);
 #endif
 
         int64_t now_hb = esp_timer_get_time();
@@ -214,11 +200,11 @@ void hls_audio_play_task(void *pvParameters)
             if (hls_log_mode_at_least(HLS_LOG_MODE_RUN) &&
                 hls_log_throttle_time("audio_summary", CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS)) {
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t rb_used = handle->buffer_size - rb_free;
-                float rb_fill_pct = (rb_used * 100.0f) / handle->buffer_size;
-                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%.0f%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
-                         decode_rate, rb_fill_pct, rb_used/1024, handle->buffer_size/1024, leftover_len,
+                size_t rb_used = 0;
+                int rb_fill_pct = 0;
+                hls_rb_get_stats(handle, NULL, &rb_used, &rb_fill_pct);
+                ESP_LOGI(TAG, "AUDIO_SUMMARY decoded=%.1f f/s rb=%d%% (%zu/%zu KB) leftover=%zu pcm_short=%lu pcm_to=%lu underrun_count=%lu underrun_streak=%d",
+                         decode_rate, rb_fill_pct, rb_used / 1024, handle->buffer_size / 1024, leftover_len,
                          (unsigned long)pcm_short_write_count, (unsigned long)pcm_timeout_count,
                          (unsigned long)underrun_count, no_data_streak);
 #else
@@ -244,10 +230,10 @@ void hls_audio_play_task(void *pvParameters)
                 // [FIX BUG AAC error:30] Drop-old propre : reprise sur frontière PES
                 // Drop jusqu'au prochain PUSI du PID audio (garantit début PES complet)
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t rb_used = handle->buffer_size - rb_free;
-                ESP_LOGW(TAG, "NOTIF_RESYNC reçue reason=drop-old - resync propre TS/PES/AAC [RB: %zu/%zu KB %.0f%%]",
-                         rb_used/1024, handle->buffer_size/1024, (rb_used*100.0f)/handle->buffer_size);
+                hls_rb_log_status(ESP_LOG_WARN,
+                                  TAG,
+                                  handle,
+                                  "NOTIF_RESYNC reçue reason=drop-old - resync propre TS/PES/AAC");
 #else
                 ESP_LOGW(TAG, "NOTIF_RESYNC reçue reason=drop-old - resync propre TS/PES/AAC");
 #endif
@@ -345,10 +331,10 @@ void hls_audio_play_task(void *pvParameters)
             }
             if (notif & NOTIF_RESET) {
 #if CONFIG_APP_HLS_PLAYER_RINGBUF_DIAG
-                size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-                size_t rb_used = handle->buffer_size - rb_free;
-                ESP_LOGW(TAG, "NOTIF_RESET reçue reason=discontinuity - reset décodeur complet [RB: %zu/%zu KB %.0f%%]",
-                         rb_used/1024, handle->buffer_size/1024, (rb_used*100.0f)/handle->buffer_size);
+                hls_rb_log_status(ESP_LOG_WARN,
+                                  TAG,
+                                  handle,
+                                  "NOTIF_RESET reçue reason=discontinuity - reset décodeur complet");
 #else
                 ESP_LOGW(TAG, "NOTIF_RESET reçue reason=discontinuity - reset décodeur complet");
 #endif
@@ -395,9 +381,7 @@ void hls_audio_play_task(void *pvParameters)
         }
 
         // === 2) Buffer monitoring et signal téléchargement ===
-        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
-        size_t filled_size = handle->buffer_size - free_size;
-        int buffer_level = (filled_size * 100) / handle->buffer_size;
+        int buffer_level = hls_rb_get_level_pct(handle);
 
         if (was_downloading && !handle->is_downloading) {
             download_signaled = false;
@@ -835,12 +819,8 @@ task_cleanup:
                  resync_count, decode_count);
     }
 
-    // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
-    UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
     const size_t AUDIO_STACK_SIZE = 4096;  // words (from xTaskCreate - P0.1 Phase 1)
-    ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
-             pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
-             (AUDIO_STACK_SIZE * sizeof(StackType_t)) - (hwm_final * sizeof(StackType_t)));
+    hls_stack_log_final(TAG, AUDIO_STACK_SIZE);
 
     // FIX: Signaler fin de tâche via sémaphore (guard pour robustesse future)
     if (handle->play_done) {

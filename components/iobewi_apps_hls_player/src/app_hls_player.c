@@ -288,10 +288,7 @@ esp_err_t app_hls_player_get_stats(app_hls_player_t *handle, app_hls_player_stat
     stats->is_playing = (handle->fetch_task != NULL) || (handle->play_task != NULL);
 
     if (handle->ring_buffer) {
-        // FIX #9: Calcul correct du niveau de buffer
-        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
-        size_t filled_size = handle->buffer_size - free_size;
-        stats->buffer_fill_percent = (filled_size * 100) / handle->buffer_size;
+        stats->buffer_fill_percent = hls_rb_get_level_pct(handle);
     } else {
         stats->buffer_fill_percent = 0;
     }
