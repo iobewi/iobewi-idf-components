@@ -215,7 +215,17 @@ menu "HLS Player Configuration"
         default 65536
         range 188 1048576
         help
-            Absolute free-space gating applied before starting a new segment.
+            Admission block threshold in bytes.
+
+    config APP_HLS_RB_RESUME_TS_MIN_FREE_BYTES
+        int "Min ringbuffer free-space to resume TS segment start (bytes)"
+        depends on APP_HLS_RB_GATING_ENABLE
+        default 81920
+        range 188 1048576
+        help
+            Admission resume threshold in bytes (hysteresis).
+            At runtime, resume is clamped to ringbuffer capacity and forced
+            to be >= start threshold.
 
     config APP_HLS_RB_GATING_POLL_MS
         int "Ringbuffer gating poll interval (ms)"
