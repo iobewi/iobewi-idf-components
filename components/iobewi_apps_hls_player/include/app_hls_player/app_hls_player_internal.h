@@ -50,7 +50,8 @@ extern "C" {
     #define CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW 55
 #endif
 #ifndef CONFIG_APP_HLS_RB_GATING_ENABLE
-    #define CONFIG_APP_HLS_RB_GATING_ENABLE 1
+    // Bool Kconfig symbols may be omitted when set to "n"; default to 0 to preserve disabled behavior.
+    #define CONFIG_APP_HLS_RB_GATING_ENABLE 0
 #endif
 #ifndef CONFIG_APP_HLS_RB_READ_CHUNK_BYTES
     #define CONFIG_APP_HLS_RB_READ_CHUNK_BYTES 3760
