@@ -16,6 +16,38 @@
 
 static const char *TAG = "hls_fetcher";
 
+typedef enum {
+    HLS_CATCHUP_STATE_STEADY = 0,
+    HLS_CATCHUP_STATE_CATCHUP = 1,
+} hls_catchup_state_t;
+
+static const char *hls_catchup_state_str(hls_catchup_state_t state)
+{
+    return (state == HLS_CATCHUP_STATE_CATCHUP) ? "CATCHUP" : "STEADY";
+}
+
+static int hls_clamp_int(int value, int min_value, int max_value)
+{
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int64_t hls_clamp_i64(int64_t value, int64_t min_value, int64_t max_value)
+{
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
 static inline void hls_compute_cycle_other_ms(int64_t cycle_start_us,
                                              int64_t master_m3u8_ms,
                                              int64_t media_m3u8_ms,
@@ -31,33 +63,101 @@ static inline void hls_compute_cycle_other_ms(int64_t cycle_start_us,
     *cycle_ms = c;
     *other_ms = o;
 }
-static void hls_resync_to_live_edge(int level,
+static int hls_compute_live_edge_backoff(int rb_level_pct)
+{
+    const int min_backoff = CONFIG_APP_HLS_LIVE_EDGE_BACKOFF_MIN;
+    const int max_backoff = CONFIG_APP_HLS_LIVE_EDGE_BACKOFF_MAX;
+    int backoff;
+
+    if (rb_level_pct <= 25) {
+        backoff = max_backoff;
+    } else if (rb_level_pct <= 60) {
+        backoff = (min_backoff + max_backoff) / 2;
+    } else {
+        backoff = min_backoff;
+    }
+
+    return hls_clamp_int(backoff, min_backoff, max_backoff);
+}
+
+static bool hls_resync_to_live_edge(int rb_level_pct,
                                     int64_t oldest_in_playlist,
                                     int64_t newest_in_playlist,
-                                    int64_t *last_sequence_number)
+                                    int64_t *last_sequence_number,
+                                    int *selected_backoff,
+                                    int64_t *selected_start_seq)
 {
-    int64_t catchup_backoff = 2;
-    if (level > 75) {
-        catchup_backoff = 4;
-    } else if (level > 60) {
-        catchup_backoff = 3;
+    if (last_sequence_number == NULL || newest_in_playlist < oldest_in_playlist) {
+        return false;
     }
 
-    int64_t catchup_seq = newest_in_playlist - catchup_backoff;
-    if (catchup_seq < oldest_in_playlist) {
-        catchup_seq = oldest_in_playlist;
-    }
+    const int backoff = hls_compute_live_edge_backoff(rb_level_pct);
+    int64_t start_seq = newest_in_playlist - backoff;
+    start_seq = hls_clamp_i64(start_seq, oldest_in_playlist, newest_in_playlist);
 
     int64_t last_before = *last_sequence_number;
-    *last_sequence_number = catchup_seq - 1;
+    *last_sequence_number = start_seq - 1;
 
-    ESP_LOGW(TAG, "→ RESYNC near-edge: reprise depuis seq=%lld (oldest=%lld newest=%lld backoff=%lld last_before=%lld last_after=%lld)",
-             (long long)catchup_seq,
+    if (selected_backoff != NULL) {
+        *selected_backoff = backoff;
+    }
+    if (selected_start_seq != NULL) {
+        *selected_start_seq = start_seq;
+    }
+
+    ESP_LOGW(TAG, "→ RESYNC near-edge: reprise seq=%lld (oldest=%lld newest=%lld backoff=%d last_before=%lld last_after=%lld)",
+             (long long)start_seq,
              (long long)oldest_in_playlist,
              (long long)newest_in_playlist,
-             (long long)catchup_backoff,
+             backoff,
              (long long)last_before,
              (long long)*last_sequence_number);
+
+    return true;
+}
+
+static int hls_compute_segments_per_cycle(size_t buffer_size,
+                                          int64_t last_sequence_number,
+                                          hls_catchup_state_t catchup_state,
+                                          int rb_level_pct)
+{
+    if (last_sequence_number < 0) {
+        const int avg_segment_size = 130 * 1024;
+        int max_initial = (int)((buffer_size * 80u / 100u) / avg_segment_size);
+        if (max_initial < 1) {
+            max_initial = 1;
+        }
+        if (max_initial > 2) {
+            max_initial = 2;
+        }
+        return max_initial;
+    }
+
+    if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+        int catchup_spc = 1;
+        if (rb_level_pct < 40) {
+            catchup_spc = 3;
+        } else if (rb_level_pct <= 70) {
+            catchup_spc = 2;
+        }
+        return hls_clamp_int(catchup_spc, 1, CONFIG_APP_HLS_SEG_PER_CYCLE_CATCHUP_MAX);
+    }
+
+    int steady_spc = (rb_level_pct > 70) ? 1 : 2;
+    return hls_clamp_int(steady_spc, 1, CONFIG_APP_HLS_SEG_PER_CYCLE_STEADY_MAX);
+}
+
+static void hls_notify_audio_reset_if_needed(const app_hls_player_t *handle,
+                                             uint32_t *resets_audio_count,
+                                             const char *reason)
+{
+    if (handle->play_task) {
+        xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+        if (resets_audio_count != NULL) {
+            (*resets_audio_count)++;
+        }
+        ESP_LOGW(TAG, "NOTIF_RESET envoyé (%s)", reason);
+    }
 }
 
 
@@ -116,8 +216,26 @@ void hls_fetch_task(void *pvParameters)
 #endif
 
     int64_t last_sequence_number = -1;
-    int resync_cooldown = 0;  // Cycles en mode prudent après décrochage
     bool ts_admission_blocked = false;
+    hls_catchup_state_t catchup_state = HLS_CATCHUP_STATE_STEADY;
+    int catchup_enter_hits = 0;
+    int catchup_exit_hits = 0;
+    int64_t last_hard_resync_us = 0;
+    int64_t last_soft_resync_us = 0;
+
+    uint32_t catchup_enter_count = 0;
+    uint32_t catchup_exit_count = 0;
+    uint32_t resync_hard_count = 0;
+    uint32_t resync_soft_count = 0;
+    uint32_t catchup_cycles = 0;
+    uint32_t resets_audio_count = 0;
+    uint32_t catchup_admission_block_cycles = 0;
+    uint32_t catchup_admission_block_segment_waits = 0;
+    uint32_t no_next_segment_cycles = 0;
+    uint32_t no_download_cycles = 0;
+    int64_t gap_sum = 0;
+    uint32_t gap_samples = 0;
+    int64_t gap_max = 0;
 
     // Playlist hors boucle pour cleanup centralisé à task_exit
     lib_m3u8_parser_playlist_t playlist;
@@ -369,38 +487,10 @@ void hls_fetch_task(void *pvParameters)
         size_t filled = handle->buffer_size - free_size;
         int level = (filled * 100) / handle->buffer_size;
 
-        int segments_per_cycle;
-        if (last_sequence_number < 0) {
-            // Cold start: limite dynamique pour éviter overflow ringbuffer pendant le 1er cycle
-            const int avg_segment_size = 130 * 1024;
-            int max_initial = (int)((handle->buffer_size * 80u / 100u) / avg_segment_size);
-            if (max_initial < 1) max_initial = 1;
-            if (max_initial > 2) max_initial = 2;
-            segments_per_cycle = max_initial;
-        } else if (level > 70) {
-            // Buffer presque plein → ralentir
-            segments_per_cycle = 1;
-        } else if (level > 50) {
-            // Buffer mi-plein → modéré
-            segments_per_cycle = 2;
-        } else if (level > 30) {
-            // Buffer bas → accélérer
-            segments_per_cycle = 3;
-        } else {
-            // Buffer critique → remplir vite
-            segments_per_cycle = 4;
-        }
-
-        // En régime établi, limiter l'agressivité pour éviter de décrocher la fenêtre live.
-        if (last_sequence_number >= 0 && segments_per_cycle > 2) {
-            segments_per_cycle = 2;
-        }
-
-        // Après un décrochage, imposer temporairement 1 segment/cycle pour se recaler proprement.
-        if (last_sequence_number >= 0 && resync_cooldown > 0) {
-            segments_per_cycle = 1;
-            resync_cooldown--;
-        }
+        int segments_per_cycle = hls_compute_segments_per_cycle(handle->buffer_size,
+                                                                last_sequence_number,
+                                                                catchup_state,
+                                                                level);
 
         // FIX: Log cold start pour faciliter debug terrain
         if (last_sequence_number < 0) {
@@ -423,7 +513,13 @@ void hls_fetch_task(void *pvParameters)
 
         if ((!ts_admission_blocked && level >= admission_high) ||
             (ts_admission_blocked && level > admission_low)) {
+            const bool was_blocked = ts_admission_blocked;
             ts_admission_blocked = true;
+            if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+                if (!was_blocked) {
+                    catchup_admission_block_cycles++;
+                }
+            }
             if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                 ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", level, admission_high, admission_low);
             }
@@ -464,6 +560,41 @@ void hls_fetch_task(void *pvParameters)
             }
         }
 
+        int64_t oldest_in_playlist = -1;
+        int64_t newest_in_playlist = -1;
+        if (playlist.segment_count > 0) {
+            oldest_in_playlist = playlist.segments[0].sequence;
+            newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
+
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+            if (last_sequence_number >= 0) {
+                int64_t gap = oldest_in_playlist - (last_sequence_number + 1);
+                if (gap > 0) {
+                    catchup_enter_hits++;
+                    if (gap > gap_max) {
+                        gap_max = gap;
+                    }
+                    gap_sum += gap;
+                    gap_samples++;
+                } else {
+                    catchup_enter_hits = 0;
+                }
+
+                if (catchup_state == HLS_CATCHUP_STATE_STEADY &&
+                    catchup_enter_hits >= CONFIG_APP_HLS_CATCHUP_ENTER_CONSECUTIVE) {
+                    catchup_state = HLS_CATCHUP_STATE_CATCHUP;
+                    catchup_enter_count++;
+                    catchup_exit_hits = 0;
+                    ESP_LOGW(TAG, "catchup_enter gap=%lld hits=%d window=[%lld..%lld] last=%lld",
+                             (long long)gap, catchup_enter_hits,
+                             (long long)oldest_in_playlist,
+                             (long long)newest_in_playlist,
+                             (long long)last_sequence_number);
+                }
+            }
+#endif
+        }
+
         if (to_download_count > 0) {
             if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
                 hls_log_throttle_time("cycle_download", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
@@ -474,9 +605,15 @@ void hls_fetch_task(void *pvParameters)
                          level);
             }
         } else if (playlist.segment_count > 0 && last_sequence_number >= 0) {
-            int64_t oldest_in_playlist = playlist.segments[0].sequence;
-            int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
+            if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+                no_download_cycles++;
+            }
+
             if (oldest_in_playlist <= last_sequence_number + 1) {
+                if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+                    no_next_segment_cycles++;
+                }
+
                 if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
                     hls_log_throttle_time("no_next_segment", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                     ESP_LOGI(TAG, "No next segment yet (wanted=%lld, last=%lld, window=[%lld..%lld], count=%d) - wait",
@@ -525,7 +662,14 @@ void hls_fetch_task(void *pvParameters)
 
                 if ((!ts_admission_blocked && seg_level >= admission_high) ||
                     (ts_admission_blocked && seg_level > admission_low)) {
+                    const bool was_blocked = ts_admission_blocked;
                     ts_admission_blocked = true;
+                    if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+                        if (!was_blocked) {
+                            catchup_admission_block_cycles++;
+                        }
+                        catchup_admission_block_segment_waits++;
+                    }
                     if (hls_log_throttle_time("ts_admission_block", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
                         ESP_LOGW(TAG, "TS_ADMISSION block rb=%d%% high=%d low=%d action=wait", seg_level, admission_high, admission_low);
                     }
@@ -545,9 +689,8 @@ void hls_fetch_task(void *pvParameters)
             }
 
             // Signaler DISCONTINUITY pour reset décodeur via task notification (P1: check flag)
-            if ((seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) && handle->play_task) {
-                ESP_LOGW(TAG, "DISCONTINUITY détectée → notification NOTIF_RESET vers play_task");
-                xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+            if (seg->flags & LIB_M3U8_PARSER_SEGMENT_FLAG_DISCONTINUITY) {
+                hls_notify_audio_reset_if_needed(handle, &resets_audio_count, "discontinuity");
             }
 
             int64_t seg_t0 = esp_timer_get_time();
@@ -599,10 +742,7 @@ void hls_fetch_task(void *pvParameters)
                 } else {
                     ESP_LOGW(TAG, "Trou de séquence: last=%lld, got=%lld (pas d'avance)",
                              (long long)last_sequence_number, (long long)seg->sequence);
-                    if (handle->play_task) {
-                        ESP_LOGW(TAG, "Trou de séquence -> notification NOTIF_RESET vers play_task");
-                        xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
-                    }
+                    hls_notify_audio_reset_if_needed(handle, &resets_audio_count, "sequence_hole");
                     hole_detected = true;
                     break;
                 }
@@ -675,22 +815,91 @@ void hls_fetch_task(void *pvParameters)
         // FIX #12: Détection décrochage et resynchronisation
         // Si aucun segment téléchargé alors que la playlist en contient, vérifier si on est trop en retard
         if (!any_downloaded_this_cycle && playlist.segment_count > 0 && last_sequence_number >= 0) {
-            // Vérifier si tous les segments disponibles ont été skippés
-            int64_t oldest_in_playlist = playlist.segments[0].sequence;
-            int64_t newest_in_playlist = playlist.segments[playlist.segment_count - 1].sequence;
-
             // Décrochage détecté : notre dernier segment est plus vieux que le plus ancien disponible
-            if (oldest_in_playlist > last_sequence_number + 1) {
-                ESP_LOGW(TAG, "DÉCROCHAGE DÉTECTÉ: last_seq=%lld, fenêtre=[%lld..%lld]",
+            int64_t gap = oldest_in_playlist - (last_sequence_number + 1);
+            if (gap > 0) {
+                ESP_LOGW(TAG, "DÉCROCHAGE DÉTECTÉ: gap=%lld last_seq=%lld fenêtre=[%lld..%lld] state=%s",
+                         (long long)gap,
                          (long long)last_sequence_number,
                          (long long)oldest_in_playlist,
-                         (long long)newest_in_playlist);
-                // Resync near live edge: backoff adaptatif selon niveau buffer.
-                hls_resync_to_live_edge(level, oldest_in_playlist, newest_in_playlist, &last_sequence_number);
+                         (long long)newest_in_playlist,
+                         hls_catchup_state_str(catchup_state));
 
-                if (handle->play_task) {
-                    xTaskNotify(handle->play_task, NOTIF_RESET, eSetBits);
+                bool did_hard_resync = false;
+                bool did_soft_resync = false;
+                int backoff_used = hls_compute_live_edge_backoff(level);
+                int64_t start_seq_used = -1;
+
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+                if (catchup_state != HLS_CATCHUP_STATE_CATCHUP) {
+                    catchup_state = HLS_CATCHUP_STATE_CATCHUP;
+                    catchup_enter_hits = CONFIG_APP_HLS_CATCHUP_ENTER_CONSECUTIVE;
+                    catchup_enter_count++;
+                    catchup_exit_hits = 0;
+                    ESP_LOGW(TAG, "catchup_enter (direct) gap=%lld window=[%lld..%lld]",
+                             (long long)gap,
+                             (long long)oldest_in_playlist,
+                             (long long)newest_in_playlist);
                 }
+
+                const int64_t now_us = esp_timer_get_time();
+                const int64_t hard_cooldown_us = (int64_t)CONFIG_APP_HLS_CATCHUP_RESYNC_COOLDOWN_MS * 1000LL;
+                const int64_t soft_cooldown_us = (hard_cooldown_us > 1500LL * 1000LL) ? (1500LL * 1000LL) : hard_cooldown_us;
+                const bool hard_cooldown_ok = (last_hard_resync_us == 0) || ((now_us - last_hard_resync_us) >= hard_cooldown_us);
+                const bool soft_cooldown_ok = (last_soft_resync_us == 0) || ((now_us - last_soft_resync_us) >= soft_cooldown_us);
+                const bool allow_hard = (gap >= CONFIG_APP_HLS_CATCHUP_HARD_GAP) && hard_cooldown_ok;
+
+                if (allow_hard) {
+                    did_hard_resync = hls_resync_to_live_edge(level,
+                                                              oldest_in_playlist,
+                                                              newest_in_playlist,
+                                                              &last_sequence_number,
+                                                              &backoff_used,
+                                                              &start_seq_used);
+                    if (did_hard_resync) {
+                        last_hard_resync_us = now_us;
+                    }
+                } else if (gap > CONFIG_APP_HLS_CATCHUP_SOFT_GAP && soft_cooldown_ok) {
+                    did_soft_resync = hls_resync_to_live_edge(level,
+                                                              oldest_in_playlist,
+                                                              newest_in_playlist,
+                                                              &last_sequence_number,
+                                                              &backoff_used,
+                                                              &start_seq_used);
+                    if (did_soft_resync) {
+                        last_soft_resync_us = now_us;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Soft catchup sans resync: gap=%lld soft_gap=%d cooldown_ms=%lld state=%s",
+                             (long long)gap,
+                             CONFIG_APP_HLS_CATCHUP_SOFT_GAP,
+                             (long long)(soft_cooldown_us / 1000LL),
+                             hls_catchup_state_str(catchup_state));
+                }
+#else
+                did_hard_resync = hls_resync_to_live_edge(level,
+                                                          oldest_in_playlist,
+                                                          newest_in_playlist,
+                                                          &last_sequence_number,
+                                                          &backoff_used,
+                                                          &start_seq_used);
+#endif
+
+                if (did_hard_resync) {
+                    resync_hard_count++;
+                    hls_notify_audio_reset_if_needed(handle, &resets_audio_count, "hard_resync");
+                } else if (did_soft_resync) {
+                    resync_soft_count++;
+                    ESP_LOGW(TAG, "Soft catchup near-edge: sans reset audio (gap=%lld start_seq=%lld backoff=%d new_last=%lld)",
+                             (long long)gap,
+                             (long long)start_seq_used,
+                             backoff_used,
+                             (long long)last_sequence_number);
+                }
+
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+                catchup_cycles++;
+#endif
 
                 int64_t cycle_ms = 0;
                 int64_t other_ms = 0;
@@ -707,9 +916,7 @@ void hls_fetch_task(void *pvParameters)
                              (long long)master_m3u8_ms, (long long)media_m3u8_ms);
                 }
 
-                // Forcer un nouveau cycle immédiatement pour télécharger les segments récents
-                // avec un micro-backoff pour éviter les rafales refresh/resync.
-                resync_cooldown = 3;
+                // Forcer un nouveau cycle immédiatement pour télécharger les segments récents.
                 lib_m3u8_parser_free(&playlist);
                 playlist_valid = false;
                 handle->is_downloading = false;
@@ -723,6 +930,31 @@ void hls_fetch_task(void *pvParameters)
             ESP_LOGD(TAG, "Aucun nouveau segment (dernier: %lld)", (long long)last_sequence_number);
         }
 
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+        if (playlist.segment_count > 0 && last_sequence_number >= 0 && newest_in_playlist >= oldest_in_playlist) {
+            const int exit_backoff = hls_compute_live_edge_backoff(level);
+            const int64_t near_live_threshold = newest_in_playlist - exit_backoff;
+
+            if (catchup_state == HLS_CATCHUP_STATE_CATCHUP) {
+                if (last_sequence_number >= near_live_threshold) {
+                    catchup_exit_hits++;
+                    if (catchup_exit_hits >= CONFIG_APP_HLS_CATCHUP_EXIT_CONSECUTIVE) {
+                        catchup_state = HLS_CATCHUP_STATE_STEADY;
+                        catchup_exit_count++;
+                        catchup_enter_hits = 0;
+                        catchup_exit_hits = 0;
+                        ESP_LOGI(TAG, "catchup_exit last=%lld threshold=%lld newest=%lld",
+                                 (long long)last_sequence_number,
+                                 (long long)near_live_threshold,
+                                 (long long)newest_in_playlist);
+                    }
+                } else {
+                    catchup_exit_hits = 0;
+                }
+            }
+        }
+#endif
+
         int64_t cycle_ms = 0;
         int64_t other_ms = 0;
         hls_compute_cycle_other_ms(cycle_start_us, master_m3u8_ms, media_m3u8_ms, ts_sum_ms, &cycle_ms, &other_ms);
@@ -735,6 +967,25 @@ void hls_fetch_task(void *pvParameters)
                      (long long)last_sequence_number,
                      (long long)ts_sum_ms, (long long)other_ms,
                      (long long)master_m3u8_ms, (long long)media_m3u8_ms);
+
+#if CONFIG_APP_HLS_LIVE_CATCHUP_ENABLE
+            int64_t gap_avg = (gap_samples > 0) ? (gap_sum / (int64_t)gap_samples) : 0;
+            ESP_LOGI(TAG, "CATCHUP_SUMMARY state=%s enter=%u exit=%u catchup_cycles=%u resync_hard=%u resync_soft=%u gap_avg=%lld gap_max=%lld resets_audio=%u",
+                     hls_catchup_state_str(catchup_state),
+                     (unsigned)catchup_enter_count,
+                     (unsigned)catchup_exit_count,
+                     (unsigned)catchup_cycles,
+                     (unsigned)resync_hard_count,
+                     (unsigned)resync_soft_count,
+                     (long long)gap_avg,
+                     (long long)gap_max,
+                     (unsigned)resets_audio_count);
+            ESP_LOGI(TAG, "CATCHUP_DIAG no_download_cycles=%u no_next_segment_cycles=%u admission_block_cycles=%u admission_block_segment_waits=%u",
+                     (unsigned)no_download_cycles,
+                     (unsigned)no_next_segment_cycles,
+                     (unsigned)catchup_admission_block_cycles,
+                     (unsigned)catchup_admission_block_segment_waits);
+#endif
         }
 
         lib_m3u8_parser_free(&playlist);
