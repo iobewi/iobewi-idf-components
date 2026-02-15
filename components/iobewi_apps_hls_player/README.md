@@ -33,13 +33,15 @@ app_hls_player/
 │   ├── app_hls_player_fetcher.h      # Module téléchargement
 │   ├── app_hls_player_audio.h        # Module décodage audio
 │   ├── app_hls_player_http.h         # Module helpers HTTP
-│   └── app_hls_player_ts_sync.h      # Module resynchronisation TS
+│   ├── app_hls_player_ts_sync.h      # Module resynchronisation TS
+│   └── app_hls_player_log.h          # Helpers mode/throttle logs
 ├── src/
 │   ├── app_hls_player.c              # Orchestration (new/start/stop/del)
 │   ├── app_hls_player_fetcher.c      # Task téléchargement
 │   ├── app_hls_player_audio.c        # Task décodage (gather buffer)
 │   ├── app_hls_player_http.c         # Helpers HTTP
-│   └── app_hls_player_ts_sync.c      # Resynchronisation TS smart
+│   ├── app_hls_player_ts_sync.c      # Resynchronisation TS smart
+│   └── app_hls_player_log.c          # Infra de throttling logs
 └── test/
     ├── test_app_hls_player.c         # Tests unitaires API publique
     └── test_ts_sync.c                # Tests unitaires resync TS
@@ -111,6 +113,36 @@ app_hls_player/
      - Stall mode : resync sur leftover uniquement si consumed==0 répété
    - Gère notifications : `NOTIF_STOP`, `NOTIF_RESET`, `NOTIF_RESYNC`
    - Signale fetch_task si buffer < 40%
+
+## Observabilité & modes de logs
+
+Le composant expose une politique de logs par mode (Kconfig) pour limiter le bruit en production:
+
+- **PROD** (défaut): erreurs + warnings critiques uniquement (silencieux en nominal).
+- **RUN**: PROD + résumés périodiques (`FETCH_SUMMARY`, `AUDIO_SUMMARY`).
+- **DIAG_LIGHT**: RUN + timings/metrics throttlés.
+- **DIAG_HEAVY**: DIAG_LIGHT + traces détaillées (ex: dump playlist).
+
+### Paramètres Kconfig principaux
+
+- `CONFIG_APP_HLS_LOG_MODE_PROD` / `RUN` / `DIAG_LIGHT` / `DIAG_HEAVY`
+- `CONFIG_APP_HLS_LOG_THROTTLE_MS` (throttle temporel)
+- `CONFIG_APP_HLS_LOG_SUMMARY_PERIOD_MS` (période des résumés RUN)
+- `CONFIG_APP_HLS_LOG_BURST_COUNT` + `CONFIG_APP_HLS_LOG_BURST_WINDOW_MS`
+- `CONFIG_APP_HLS_LOG_SAMPLE_N_FAST` / `CONFIG_APP_HLS_LOG_SAMPLE_N_SLOW`
+
+> Note: `SAMPLE_N_FAST/SLOW` s'appliquent uniquement en `DIAG_LIGHT/DIAG_HEAVY`.
+
+### Helpers de throttling
+
+Le module `app_hls_player_log` fournit:
+
+- `hls_log_mode_at_least(mode)`
+- `hls_log_throttle_time(key, min_interval_ms)`
+- `hls_log_throttle_every_n(key, n)`
+- `hls_log_throttle_burst(key, burst_count, window_ms)`
+
+**Contrat important**: la `key` doit être un pointeur stable (littéral de chaîne ou `static const char[]`), car la lookup est faite par identité de pointeur.
 
 ## API Publique
 

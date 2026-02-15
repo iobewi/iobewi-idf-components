@@ -133,19 +133,22 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle, const uint8_t
             size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
             int64_t waited_ms = (now_us - wait_begin_us) / 1000;
 
-            ESP_LOGW(TAG,
-                     "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
-                     level,
-                     (long long)waited_ms,
-                     (unsigned)rb_free,
+            if (hls_log_throttle_time("rb_send_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
+                hls_log_throttle_burst("rb_send_wait", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
+                ESP_LOGW(TAG,
+                         "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 high=%d low=%d",
+                         level,
+                         (long long)waited_ms,
+                         (unsigned)rb_free,
 #if CONFIG_APP_HLS_PLAYER_BACKPRESSURE
-                     high_wm,
-                     low_wm
+                         high_wm,
+                         low_wm
 #else
-                     -1,
-                     -1
+                         -1,
+                         -1
 #endif
-            );
+                );
+            }
             last_wait_log_us = now_us;
         }
 
@@ -573,7 +576,9 @@ static esp_err_t hls_http_commit_staged_segment(app_hls_player_t *handle,
     int64_t rb_wait_ms = rb_wait_us / 1000;
     handle->last_seg_metrics.rb_wait_ms += rb_wait_ms;
 
-    if (rb_wait_ms >= COMMIT_WAIT_WARN_MS) {
+    if (rb_wait_ms >= COMMIT_WAIT_WARN_MS &&
+        hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
+        hls_log_throttle_time("commit_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
         ESP_LOGW(TAG, "COMMIT wait rb=%d%% waited_ms=%lld bytes=%u",
                  hls_ringbuf_level_pct(handle),
                  (long long)rb_wait_ms,
@@ -588,7 +593,9 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
     int64_t seg_t0 = esp_timer_get_time();
     memset(&handle->last_seg_metrics, 0, sizeof(handle->last_seg_metrics));
 
-    ESP_LOGI(TAG, "Téléchargement: %s", url);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Téléchargement: %s", url);
+    }
 
     bool reuse_hit = false;
     esp_http_client_handle_t client = hls_http_ts_client_get_or_create(handle, url, &reuse_hit);
@@ -643,11 +650,15 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
 
 char* hls_http_download_m3u8(const char *url)
 {
-    ESP_LOGI(TAG, "Téléchargement M3U8: %s", url);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Téléchargement M3U8: %s", url);
+    }
 
     size_t free_heap = esp_get_free_heap_size();
     size_t min_heap = esp_get_minimum_free_heap_size();
-    ESP_LOGI(TAG, "Heap avant M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Heap avant M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    }
 
     // FIX: Realloc progressif pour éviter overflow si chunked > 16KB
     // Allocation initiale 16KB, croissance par blocs de 16KB, max 64KB
@@ -828,12 +839,16 @@ char* hls_http_download_m3u8(const char *url)
         return NULL;
     }
 
-    ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %zu)", offset, buffer_capacity);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "M3U8 téléchargé: %d bytes (capacité: %zu)", offset, buffer_capacity);
+    }
 
     // Log heap après pour tracker fragmentation
     free_heap = esp_get_free_heap_size();
     min_heap = esp_get_minimum_free_heap_size();
-    ESP_LOGI(TAG, "Heap après M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    if (hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT)) {
+        ESP_LOGI(TAG, "Heap après M3U8: libre=%zu, min=%zu", free_heap, min_heap);
+    }
 
     return buffer;
 }

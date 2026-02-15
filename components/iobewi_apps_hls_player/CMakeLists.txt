@@ -5,6 +5,7 @@ idf_component_register(
         "src/app_hls_player_http.c"
         "src/app_hls_player_audio.c"
         "src/app_hls_player_fetcher.c"
+        "src/app_hls_player_log.c"
     INCLUDE_DIRS "include"
     PRIV_REQUIRES
         esp_common
