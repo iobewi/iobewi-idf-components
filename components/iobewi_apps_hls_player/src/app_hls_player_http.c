@@ -668,6 +668,8 @@ esp_err_t hls_http_download_segment(app_hls_player_t *handle, const char *url)
         handle->last_seg_metrics.rb_send_fail_retries = 0;
         handle->last_seg_metrics.rb_gating_wait_ms = 0;
         handle->last_seg_metrics.rb_free_min = handle->buffer_size;
+        // Retry safety: clear any partial TS carry from failed attempt before re-reading stream bytes.
+        handle->ts_carry_len = 0;
 
         err = hls_http_download_segment_once(handle, client, url, NULL,
                                              &segment_stage, &segment_stage_len);
