@@ -58,13 +58,6 @@ static bool get_location_header(esp_http_client_handle_t client, char *buf, size
     return false;
 }
 
-static int hls_ringbuf_level_pct(app_hls_player_t *handle)
-{
-    size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
-    size_t rb_used = handle->buffer_size - rb_free;
-    return (int)((rb_used * 100u) / handle->buffer_size);
-}
-
 static void hls_metrics_update_free_min(app_hls_player_t *handle, size_t rb_free)
 {
     if (handle->last_seg_metrics.rb_free_min == 0 || rb_free < handle->last_seg_metrics.rb_free_min) {
@@ -165,7 +158,7 @@ static esp_err_t rb_send_ts_backpressure(app_hls_player_t *handle,
         if ((now_us - last_wait_log_us) >= (250 * 1000) &&
             hls_log_throttle_time("rb_send_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS) &&
             hls_log_throttle_burst("rb_send_wait", CONFIG_APP_HLS_LOG_BURST_COUNT, CONFIG_APP_HLS_LOG_BURST_WINDOW_MS)) {
-            int level = hls_ringbuf_level_pct(handle);
+            int level = hls_rb_get_level_pct(handle);
             ESP_LOGW(TAG, "RB_SEND_WAIT rb=%d%% waited_ms=%lld free=%u item=188 retries=%u max_wait=%u",
                      level,
                      (long long)waited_ms,
@@ -614,7 +607,7 @@ static esp_err_t hls_http_commit_staged_segment(app_hls_player_t *handle,
         hls_log_mode_at_least(HLS_LOG_MODE_DIAG_LIGHT) &&
         hls_log_throttle_time("commit_wait", CONFIG_APP_HLS_LOG_THROTTLE_MS)) {
         ESP_LOGW(TAG, "COMMIT wait rb=%d%% waited_ms=%lld bytes=%u",
-                 hls_ringbuf_level_pct(handle),
+                 hls_rb_get_level_pct(handle),
                  (long long)rb_wait_ms,
                  (unsigned)segment_stage_len);
     }

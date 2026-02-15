@@ -231,8 +231,7 @@ static bool hls_ts_admission_should_block(app_hls_player_t *handle,
 
     return false;
 #else
-    size_t rb_filled = handle->buffer_size - rb_free;
-    int level = (rb_filled * 100) / handle->buffer_size;
+    int level = hls_rb_get_level_pct_from_free(handle, rb_free);
     const int admission_high = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_HIGH;
     const int admission_low = CONFIG_APP_HLS_PLAYER_TS_ADMISSION_LOW;
 
@@ -321,9 +320,7 @@ void hls_fetch_task(void *pvParameters)
 
     // [RAM OPT] Instrumentation stack HWM (P0 phase 0)
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
-    UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
-    ESP_LOGI(TAG, "[STACK] %s: HWM initial = %u words (%u bytes) [sizeof(StackType_t)=%u]",
-             pcTaskGetName(NULL), hwm_initial, hwm_initial * sizeof(StackType_t), sizeof(StackType_t));
+    hls_stack_log_initial(TAG);
 #endif
 
     int64_t last_sequence_number = -1;
@@ -360,17 +357,8 @@ void hls_fetch_task(void *pvParameters)
 
     while (true) {
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
-        // [P0.1] Log HWM périodique toutes les 5s (debug only)
-        // HWM = free min (marge restante), pas usage
-        // Usage peak = S_allocated - HWM
         static int64_t last_log_us = 0;
-        int64_t now = esp_timer_get_time();
-        if (now - last_log_us > 5 * 1000 * 1000) {
-            last_log_us = now;
-            UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGD(TAG, "[STACK] HWM=%u words (%u bytes free min) [hls_fetch]",
-                     (unsigned)hwm, (unsigned)(hwm * sizeof(StackType_t)));
-        }
+        hls_stack_log_periodic(TAG, "hls_fetch", &last_log_us, 5 * 1000 * 1000);
 #endif
 
         // Reset systématique en début de cycle (défense bug logique)
@@ -594,9 +582,9 @@ void hls_fetch_task(void *pvParameters)
         int64_t ts_sum_ms = 0;        // Somme durées download TS du cycle
 
         // FIX #13: Segments adaptatifs au buffer (évite overflow → drop-old → corruption)
-        size_t free_size = xRingbufferGetCurFreeSize(handle->ring_buffer);
-        size_t filled = handle->buffer_size - free_size;
-        int level = (filled * 100) / handle->buffer_size;
+        size_t free_size = 0;
+        int level = 0;
+        hls_rb_get_stats(handle, &free_size, NULL, &level);
 
         int segments_per_cycle = hls_compute_segments_per_cycle(handle->buffer_size,
                                                                 last_sequence_number,
@@ -1097,13 +1085,9 @@ task_exit:
         ESP_LOGI(TAG, "Arrêt de la task de téléchargement HLS");
     }
 
-    // [RAM OPT] Log HWM final avant sortie (P0 phase 0)
 #if CONFIG_APP_HLS_PLAYER_STACK_DIAG
-    UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
     const size_t FETCH_STACK_SIZE = 11264;  // words (from xTaskCreate - P0.1 Phase 1)
-    ESP_LOGI(TAG, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
-             pcTaskGetName(NULL), hwm_final, hwm_final * sizeof(StackType_t),
-             (FETCH_STACK_SIZE * sizeof(StackType_t)) - (hwm_final * sizeof(StackType_t)));
+    hls_stack_log_final(TAG, FETCH_STACK_SIZE);
 #endif
 
     // Signaler fin de tâche via sémaphore

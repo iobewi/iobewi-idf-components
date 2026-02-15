@@ -12,6 +12,8 @@
 
 #include "app_hls_player/app_hls_player.h"
 #include "app_hls_player/app_hls_player_log.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -184,6 +186,127 @@ static inline bool hls_should_stop_now(void)
 {
     uint32_t notif = 0;
     return (xTaskNotifyWait(0, NOTIF_STOP, &notif, 0) == pdTRUE) && (notif & NOTIF_STOP);
+}
+
+static inline int hls_rb_get_level_pct_from_free(const app_hls_player_t *handle, size_t rb_free)
+{
+    if (handle == NULL || handle->buffer_size == 0) {
+        return 0;
+    }
+
+    size_t rb_used = handle->buffer_size - rb_free;
+    return (int)((rb_used * 100u) / handle->buffer_size);
+}
+
+/**
+ * @brief Retourne le niveau de remplissage du ringbuffer en pourcentage.
+ */
+static inline int hls_rb_get_level_pct(const app_hls_player_t *handle)
+{
+    if (handle == NULL || handle->ring_buffer == NULL || handle->buffer_size == 0) {
+        return 0;
+    }
+
+    size_t rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+    return hls_rb_get_level_pct_from_free(handle, rb_free);
+}
+
+/**
+ * @brief Retourne les stats du ringbuffer (free, used, pct).
+ */
+static inline void hls_rb_get_stats(const app_hls_player_t *handle,
+                                    size_t *out_free,
+                                    size_t *out_used,
+                                    int *out_pct)
+{
+    size_t rb_free = 0;
+    size_t rb_used = 0;
+    int rb_pct = 0;
+
+    if (handle != NULL && handle->ring_buffer != NULL && handle->buffer_size > 0) {
+        rb_free = xRingbufferGetCurFreeSize(handle->ring_buffer);
+        rb_used = handle->buffer_size - rb_free;
+        rb_pct = hls_rb_get_level_pct_from_free(handle, rb_free);
+    }
+
+    if (out_free) {
+        *out_free = rb_free;
+    }
+    if (out_used) {
+        *out_used = rb_used;
+    }
+    if (out_pct) {
+        *out_pct = rb_pct;
+    }
+}
+
+/**
+ * @brief Log stack HWM initial pour la tâche courante.
+ */
+static inline void hls_stack_log_initial(const char *tag)
+{
+    UBaseType_t hwm_initial = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(tag, "[STACK] %s: HWM initial = %u words (%u bytes) [sizeof(StackType_t)=%u]",
+             pcTaskGetName(NULL),
+             (unsigned)hwm_initial,
+             (unsigned)(hwm_initial * sizeof(StackType_t)),
+             (unsigned)sizeof(StackType_t));
+}
+
+/**
+ * @brief Log stack HWM périodique (debug) pour la tâche courante.
+ */
+static inline void hls_stack_log_periodic(const char *tag,
+                                          const char *task_label,
+                                          int64_t *last_log_us,
+                                          int64_t period_us)
+{
+    if (last_log_us == NULL) {
+        return;
+    }
+
+    int64_t now = esp_timer_get_time();
+    if ((now - *last_log_us) > period_us) {
+        *last_log_us = now;
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGD(tag, "[STACK] HWM=%u words (%u bytes free min) [%s]",
+                 (unsigned)hwm,
+                 (unsigned)(hwm * sizeof(StackType_t)),
+                 (task_label != NULL) ? task_label : pcTaskGetName(NULL));
+    }
+}
+
+/**
+ * @brief Log stack HWM final pour la tâche courante.
+ */
+static inline void hls_stack_log_final(const char *tag, size_t stack_size_words)
+{
+    UBaseType_t hwm_final = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(tag, "[STACK] %s: HWM final = %u words (%u bytes) - utilisation max = %u bytes",
+             pcTaskGetName(NULL),
+             (unsigned)hwm_final,
+             (unsigned)(hwm_final * sizeof(StackType_t)),
+             (unsigned)((stack_size_words * sizeof(StackType_t)) -
+                        (hwm_final * sizeof(StackType_t))));
+}
+
+/**
+ * @brief Log un statut ringbuffer homogène en KB + pourcentage.
+ */
+static inline void hls_rb_log_status(esp_log_level_t level,
+                                     const char *tag,
+                                     const app_hls_player_t *handle,
+                                     const char *message)
+{
+    size_t rb_used = 0;
+    int rb_pct = 0;
+    hls_rb_get_stats(handle, NULL, &rb_used, &rb_pct);
+
+    ESP_LOG_LEVEL(level, tag, "%s [RB: %zu/%zu KB %d%%]",
+                  message,
+                  rb_used / 1024,
+                  (handle != NULL) ? (handle->buffer_size / 1024) : 0,
+                  rb_pct);
 }
 
 #ifdef __cplusplus
